@@ -65,6 +65,124 @@ function enviarResultadoFinal(resultado) {
   chrome.runtime.sendMessage({ tipo: "RESULTADO_FINAL", resultado }).catch(() => {});
 }
 
+// =========================================================================
+// DIAG-001 — INSTRUMENTACION DIAGNOSTICA DE TIMELINE (NO funcional)
+//
+// Autorizada explicitamente para investigar por que Judicial falla cuando
+// la pestana permanece inactiva (ver README, "Historial tecnico"). Esta
+// seccion SOLO OBSERVA: no decide nada, no cambia ningun timer, timeout,
+// MutationObserver, selector, navegacion ni contrato de mensajes
+// existente. Cada llamada a registrarTrace() es una linea ADICIONAL junto
+// al codigo real, nunca un reemplazo de el.
+//
+// Persistencia: chrome.storage.local (permiso "storage" ya declarado en
+// manifest.json, sin cambios) bajo CLAVE_TRACE_JUDICIAL, con un limite de
+// LIMITE_TRACE_JUDICIAL entradas (recorte FIFO) para no crecer sin
+// control. No guarda contraseñas/cookies/tokens: el unico dato personal
+// que puede aparecer en "detalle" es el nombre que el flujo real YA
+// recibe (ejecutarConsultaJudicial), nunca un dato nuevo agregado solo
+// para debug.
+// =========================================================================
+
+const CLAVE_TRACE_JUDICIAL = "nexoraJudicialTrace";
+const LIMITE_TRACE_JUDICIAL = 300;
+let nexoraTracelineMemoria = [];
+let nexoraPanelDebugShadow = null;
+
+function _formatearHoraTrace(fecha) {
+  const dos = (n) => String(n).padStart(2, "0");
+  const tres = (n) => String(n).padStart(3, "0");
+  return `${dos(fecha.getHours())}:${dos(fecha.getMinutes())}:${dos(fecha.getSeconds())}.${tres(fecha.getMilliseconds())}`;
+}
+
+/**
+ * Registra UN evento de la timeline diagnostica. NO decide nada sobre el
+ * flujo real: solo observa y deja constancia (consola + memoria +
+ * chrome.storage.local + panel visual). Llamarla nunca debe cambiar el
+ * resultado de ninguna funcion existente.
+ */
+function registrarTrace(evento, detalle) {
+  const ahora = new Date();
+  const entrada = {
+    timestamp: _formatearHoraTrace(ahora),
+    perfNow: Math.round(performance.now() * 1000) / 1000,
+    evento,
+    detalle: detalle || null,
+  };
+
+  console.log(`[NEXORA-DIAG] ${entrada.timestamp} | ${evento}${detalle ? " | " + detalle : ""}`);
+
+  nexoraTracelineMemoria.push(entrada);
+  if (nexoraTracelineMemoria.length > LIMITE_TRACE_JUDICIAL) {
+    nexoraTracelineMemoria = nexoraTracelineMemoria.slice(-LIMITE_TRACE_JUDICIAL);
+  }
+
+  try {
+    chrome.storage.local.get(CLAVE_TRACE_JUDICIAL, (datos) => {
+      const previo = (datos && datos[CLAVE_TRACE_JUDICIAL]) || [];
+      const combinado = previo.concat([entrada]).slice(-LIMITE_TRACE_JUDICIAL);
+      chrome.storage.local.set({ [CLAVE_TRACE_JUDICIAL]: combinado });
+    });
+  } catch (e) {
+    // Si storage no esta disponible por alguna razon, el diagnostico no
+    // debe romper el flujo real: se ignora silenciosamente, el log de
+    // consola y la memoria ya quedaron registrados igual.
+  }
+
+  _actualizarPanelDebugJudicial();
+}
+
+/**
+ * Panel visual MINIMO, aislado via Shadow DOM (para no heredar ni filtrar
+ * estilos hacia/desde la pagina real de Rama Judicial), fijo en una
+ * esquina, con pointer-events:none para garantizar que NUNCA intercepta
+ * un click destinado al sitio real. Puramente informativo.
+ */
+function _crearPanelDebugJudicial() {
+  if (nexoraPanelDebugShadow || !document.body) return;
+  const host = document.createElement("div");
+  host.id = "nexora-debug-judicial-host";
+  host.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:2147483647;pointer-events:none;";
+  document.body.appendChild(host);
+
+  const shadow = host.attachShadow({ mode: "open" });
+  const estilo = document.createElement("style");
+  estilo.textContent = `
+    .panel { font-family: monospace; font-size: 10px; line-height: 1.4; background: rgba(0,0,0,0.85);
+      color: #0f0; border: 1px solid #0f0; border-radius: 4px; padding: 6px 8px; max-width: 480px;
+      max-height: 220px; overflow: hidden; white-space: pre; }
+    .titulo { color: #ff0; font-weight: bold; margin-bottom: 4px; }
+    .estado { color: #fff; margin-bottom: 4px; }
+  `;
+  const contenedor = document.createElement("div");
+  contenedor.className = "panel";
+  contenedor.innerHTML =
+    '<div class="titulo">NEXORA DEBUG — JUDICIAL TIMELINE</div>' +
+    '<div class="estado" id="estadoActual">Esperando...</div>' +
+    '<div id="lineas"></div>';
+
+  shadow.appendChild(estilo);
+  shadow.appendChild(contenedor);
+  nexoraPanelDebugShadow = shadow;
+}
+
+function _actualizarPanelDebugJudicial() {
+  try {
+    _crearPanelDebugJudicial();
+    if (!nexoraPanelDebugShadow) return;
+    const lineas = nexoraPanelDebugShadow.getElementById("lineas");
+    const estadoActual = nexoraPanelDebugShadow.getElementById("estadoActual");
+    if (!lineas) return;
+    const ultimas = nexoraTracelineMemoria.slice(-12);
+    lineas.textContent = ultimas.map((e) => `${e.timestamp} ${e.evento}${e.detalle ? " " + e.detalle : ""}`).join("\n");
+    if (estadoActual && nexoraTracelineMemoria.length > 0) {
+      estadoActual.textContent = "Estado actual: " + nexoraTracelineMemoria[nexoraTracelineMemoria.length - 1].evento;
+    }
+  } catch (e) {
+    // Puramente visual: cualquier fallo aqui nunca debe propagarse al flujo real.
+  }
+}
+
 function normalizarTexto(s) {
   return (s || "")
     .normalize("NFD")
@@ -547,6 +665,7 @@ function manejarModalVariosRegistrosSiAparece(callback) {
 }
 
 function ejecutarConsultaJudicial(nombre) {
+  registrarTrace("INICIO_CONSULTA", `nombre="${nombre}"`);
   enviarEstado("VALIDANDO_FORMULARIO", "Localizando formulario de Consulta por Nombre o Razón Social...");
 
   const campoNombre = encontrarCampoNombre();
@@ -560,6 +679,7 @@ function ejecutarConsultaJudicial(nombre) {
     return;
   }
 
+  registrarTrace("SELECCIONANDO_PERSONA_NATURAL");
   seleccionarTipoPersonaNatural((resultadoNatural) => {
     NEXORA_LOG(`tipo_persona seleccion: exito=${resultadoNatural.exito} motivo=${resultadoNatural.motivo || "ok"}`);
 
@@ -570,7 +690,9 @@ function ejecutarConsultaJudicial(nombre) {
       return;
     }
     NEXORA_LOG("tipo_persona=NATURAL");
+    registrarTrace("PERSONA_NATURAL_OK");
 
+    registrarTrace("SELECCIONANDO_TODOS_PROCESOS");
     seleccionarTodosLosProcesos((resultadoTodosProcesos) => {
       NEXORA_LOG(
         `tipo_consulta seleccion: exito=${resultadoTodosProcesos.exito} motivo=${resultadoTodosProcesos.motivo || "ok"}`
@@ -584,7 +706,9 @@ function ejecutarConsultaJudicial(nombre) {
         capturarSnapshotDesconocido(nombre, resultadoTodosProcesos.motivo, resultadoTodosProcesos);
         return;
       }
+      registrarTrace("TODOS_PROCESOS_OK");
 
+      registrarTrace("ESCRIBIENDO_NOMBRE");
       escribirNombreYVerificar(campoNombre, nombre, (resultadoNombre) => {
         NEXORA_LOG(
           `nombre preparacion: exito=${resultadoNombre.exito} motivo=${resultadoNombre.motivo || "ok"} valor="${
@@ -596,18 +720,22 @@ function ejecutarConsultaJudicial(nombre) {
           capturarSnapshotDesconocido(nombre, resultadoNombre.motivo, resultadoNombre);
           return;
         }
+        registrarTrace("NOMBRE_ESCRITO");
 
         enviarEstado("CONSULTANDO", `Ejecutando consulta para "${nombre}"...`);
 
+        registrarTrace("ESPERANDO_BOTON_CONSULTAR");
         esperarBotonConsultarInteractuable((botonConsultarActual, motivoError) => {
           if (!botonConsultarActual) {
             capturarSnapshotDesconocido(nombre, motivoError, { paso: "CLICK_CONSULTAR" });
             return;
           }
+          registrarTrace("BOTON_CONSULTAR_ENCONTRADO");
 
           const urlAntesDelClick = location.href;
           NEXORA_LOG(`consultar: click ejecutado. url=${urlAntesDelClick}`);
           botonConsultarActual.click();
+          registrarTrace("CONSULTA_ENVIADA");
           setTimeout(() => {
             NEXORA_LOG(
               `consultar: estado 300ms despues del click. url=${location.href} cambioUrl=${
@@ -616,7 +744,13 @@ function ejecutarConsultaJudicial(nombre) {
             );
           }, 300);
 
+          registrarTrace("ESPERANDO_MODAL");
           manejarModalVariosRegistrosSiAparece((resultadoModal) => {
+            registrarTrace(
+              resultadoModal.detectado ? "MODAL_DETECTADO" : "MODAL_NO_DETECTADO",
+              `detectado=${resultadoModal.detectado} cerrado=${resultadoModal.cerrado} motivo=${resultadoModal.motivo || "ok"}`
+            );
+
             if (resultadoModal.detectado && !resultadoModal.cerrado) {
               // El modal aparecio pero no se pudo cerrar (VOLVER no
               // encontrado, o siguio presente tras el click): no tiene
@@ -627,6 +761,7 @@ function ejecutarConsultaJudicial(nombre) {
             }
 
             NEXORA_LOG("listado: esperando resultados");
+            registrarTrace("ESPERANDO_LISTADO");
             observarListadoResultados(nombre);
           });
         });
@@ -863,6 +998,8 @@ function entregarListadoDeProcesos(nombre, radicados) {
     estado_consulta: "LISTADO_DETECTADO",
     procesos,
   });
+  registrarTrace("RESULTADO_ENTREGADO", `${procesos.length} proceso(s) (${totalAbribles} abrible(s))`);
+  registrarTrace("FINALIZACION", "estado_final=LISTADO_DETECTADO");
 }
 
 function observarListadoResultados(nombre) {
@@ -876,6 +1013,9 @@ function observarListadoResultados(nombre) {
       resuelto = true;
       enviarEstado("SIN_RESULTADOS", "La Rama Judicial no reporto procesos para este nombre.");
       enviarResultadoFinal({ fuente: "RAMA_JUDICIAL", nombre_consultado: nombre, estado_consulta: "SIN_RESULTADOS", procesos: [] });
+      registrarTrace("LISTADO_NO_DETECTADO", "SIN_RESULTADOS");
+      registrarTrace("RESULTADO_ENTREGADO", "SIN_RESULTADOS (0 procesos)");
+      registrarTrace("FINALIZACION", "estado_final=SIN_RESULTADOS");
       return true;
     }
 
@@ -890,6 +1030,8 @@ function observarListadoResultados(nombre) {
       // (LISTADO_ENTREGADO), a partir de la tabla real completa.
       enviarEstado("RESULTADO_DETECTADO", "Listado de resultados detectado, extrayendo procesos...");
       NEXORA_LOG("RESULTADO_DETECTADO - listado detectado, extrayendo procesos...");
+      registrarTrace("OBSERVER_DETECTO_OBJETIVO", "listado");
+      registrarTrace("LISTADO_DETECTADO", `${radicados.length} radicado(s) candidato(s)`);
 
       entregarListadoDeProcesos(nombre, radicados);
       return true;
@@ -899,15 +1041,22 @@ function observarListadoResultados(nombre) {
 
   if (intentar()) return;
 
+  registrarTrace("OBSERVER_INICIADO", "listado");
   const observer = new MutationObserver(() => {
     if (intentar()) observer.disconnect();
   });
   observer.observe(document.body, { childList: true, subtree: true });
 
+  registrarTrace("TIMER_PROGRAMADO", `listado timeout=${TIMEOUT_MS}ms`);
+  const _listadoTimeoutProgramadoEn = performance.now();
   setTimeout(() => {
     if (resuelto) return;
     resuelto = true;
     observer.disconnect();
+    const _elapsed = Math.round(performance.now() - _listadoTimeoutProgramadoEn);
+    registrarTrace("TIMER_EJECUTADO", `listado timeout programado=${TIMEOUT_MS}ms elapsed=${_elapsed}ms`);
+    registrarTrace("OBSERVER_TIMEOUT", "listado");
+    registrarTrace("LISTADO_NO_DETECTADO", "LISTADO_TIMEOUT");
     capturarSnapshotDesconocido(nombre, "LISTADO_TIMEOUT");
   }, TIMEOUT_MS);
 }
@@ -1845,6 +1994,7 @@ function finalizarConsultaJudicial(trabajo) {
 // =========================================================================
 
 function capturarSnapshotDesconocido(nombre, motivo, extra) {
+  registrarTrace(motivo && String(motivo).includes("TIMEOUT") ? "TIMEOUT" : "ERROR", `motivo=${motivo}`);
   enviarEstado("ERROR_CONSULTA", `Motivo: ${motivo}. Se guardo un snapshot de diagnostico.`);
   chrome.storage.local.set({
     ultimoSnapshotJudicialDesconocido: {
@@ -1865,6 +2015,7 @@ function capturarSnapshotDesconocido(nombre, motivo, extra) {
     procesos: [],
     _nota: "Revisa 'ultimoSnapshotJudicialDesconocido' en chrome.storage.local para disenar la correccion.",
   });
+  registrarTrace("FINALIZACION", `estado_final=ERROR_CONSULTA motivo=${motivo}`);
 }
 
 // =========================================================================
@@ -1961,3 +2112,4 @@ chrome.runtime.onMessage.addListener((mensaje, sender, sendResponse) => {
 })();
 
 NEXORA_LOG("Content script Judicial cargado en " + location.href);
+_crearPanelDebugJudicial();
