@@ -544,6 +544,23 @@ function escribirNombreYVerificar(campoNombre, nombre, callback) {
     const mensajeError = contenedorCampo ? contenedorCampo.querySelector(".v-messages__message") : null;
     const sinErrorVisible = !mensajeError || !limpiarTexto(mensajeError.textContent);
 
+    // DIAG-002 (diagnostico, NO decide nada): registra el detalle exacto de
+    // ESTE intento antes de evaluar exito/fracaso, para poder reconstruir
+    // despues cual condicion (valorConservado o sinErrorVisible) fue la
+    // que impidio NOMBRE_ESCRITO en segundo plano.
+    registrarTrace(
+      "VERIFICACION_NOMBRE",
+      JSON.stringify({
+        intento: verificaciones,
+        valorConservado,
+        valorActual: campoNombre.value,
+        valorEsperado: valor,
+        sinErrorVisible,
+        mensajeErrorPresente: !!mensajeError,
+        mensajeErrorTexto: mensajeError ? limpiarTexto(mensajeError.textContent) : null,
+      })
+    );
+
     if (valorConservado && sinErrorVisible) {
       callback({ exito: true, motivo: null, valor });
       return;

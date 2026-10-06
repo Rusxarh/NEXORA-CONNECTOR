@@ -50,3 +50,35 @@ Comparación Judicial activa vs. Judicial inactiva.
 **Resultado:**
 
 PENDIENTE.
+
+### DIAG-002 — Diagnóstico granular de NOMBRE_NO_VALIDADO
+
+**Estado:** EN INVESTIGACIÓN
+
+**Motivo:**
+
+DIAG-001 identificó la primera divergencia entre Judicial activa e
+inactiva en `escribirNombreYVerificar()`.
+
+**Objetivo:**
+
+Determinar cuál condición de validación permanece falsa:
+
+- `valorConservado`
+- `sinErrorVisible`
+
+**Cambio:**
+
+Instrumentación por intento dentro de `verificar()`.
+
+**Lógica funcional modificada:**
+
+NO.
+
+**Reparación:**
+
+NO aplicada.
+
+**Próxima prueba:**
+
+Repetir Caso A y analizar cada intento.
