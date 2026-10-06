@@ -1214,42 +1214,51 @@ function seleccionarYAbrirRadicado(radicado) {
 
   NEXORA_LOG(`RADICADO_VALIDADO - ${radicado}`);
   enviarEstado("RADICADO_VALIDADO", `Radicado ${radicado} localizado de forma unica en el listado.`);
+  registrarTrace("RADICADO_VALIDADO", radicado);
 
   coincidencias[0].click();
 
   NEXORA_LOG("RADICADO_ABIERTO - esperando detalle");
   enviarEstado("RADICADO_ABRIENDO", `Abriendo el proceso ${radicado}...`);
+  registrarTrace("RADICADO_ABRIENDO", radicado);
 
   esperarDetalleProceso(radicado, (resultado) => {
     if (!resultado.exito) {
       NEXORA_LOG(`${resultado.motivo} - ${radicado}`);
       enviarEstado(resultado.motivo, `Radicado solicitado: ${radicado}.`);
+      registrarTrace("ERROR", `${resultado.motivo} radicado=${radicado}`);
       return;
     }
 
     NEXORA_LOG(`DETALLE_DETECTADO - ${radicado}`);
     enviarEstado("DETALLE_DETECTADO", `Detalle del proceso ${radicado} confirmado correctamente.`);
+    registrarTrace("DETALLE_DETECTADO", radicado);
 
     NEXORA_LOG(`ACTUACIONES_ABRIENDO - ${radicado}`);
     enviarEstado("ACTUACIONES_ABRIENDO", `Abriendo la pestaña Actuaciones del proceso ${radicado}...`);
+    registrarTrace("ACTUACIONES_ABRIENDO", radicado);
 
     abrirActuaciones((resultadoActuaciones) => {
       if (!resultadoActuaciones.exito) {
         NEXORA_LOG(`${resultadoActuaciones.motivo} - ${radicado}`);
         enviarEstado(resultadoActuaciones.motivo, `Radicado: ${radicado}.`);
+        registrarTrace("ERROR", `${resultadoActuaciones.motivo} radicado=${radicado}`);
         return;
       }
 
       NEXORA_LOG(`ACTUACIONES_DETECTADAS - ${radicado}`);
       enviarEstado("ACTUACIONES_DETECTADAS", `Pestaña Actuaciones activa para el proceso ${radicado}.`);
+      registrarTrace("ACTUACIONES_DETECTADAS", radicado);
 
       NEXORA_LOG(`ACTUACIONES_EXTRAYENDO - ${radicado}`);
       enviarEstado("ACTUACIONES_EXTRAYENDO", `Extrayendo la tabla de actuaciones del proceso ${radicado}...`);
+      registrarTrace("ACTUACIONES_EXTRAYENDO", radicado);
 
       extraerActuacionesJudicial(radicado, (resultadoExtraccion) => {
         if (!resultadoExtraccion.exito) {
           NEXORA_LOG(`${resultadoExtraccion.motivo} - ${radicado}`);
           enviarEstado(resultadoExtraccion.motivo, `Radicado: ${radicado}.`);
+          registrarTrace("ERROR", `${resultadoExtraccion.motivo} radicado=${radicado}`);
           guardarUltimoResultadoActuaciones({
             estado: "ERROR",
             fuente: "JUDICIAL",
@@ -1257,6 +1266,7 @@ function seleccionarYAbrirRadicado(radicado) {
             motivo: resultadoExtraccion.motivo,
             actuaciones: [],
           });
+          registrarTrace("FINALIZACION", `estado_final=ERROR radicado=${radicado}`);
           return;
         }
 
@@ -1265,6 +1275,7 @@ function seleccionarYAbrirRadicado(radicado) {
           "ACTUACIONES_EXTRAIDAS",
           `${resultadoExtraccion.actuaciones.length} actuacion(es) extraida(s) para el proceso ${radicado}.`
         );
+        registrarTrace("ACTUACIONES_EXTRAIDAS", `${resultadoExtraccion.actuaciones.length} fila(s) radicado=${radicado}`);
         guardarUltimoResultadoActuaciones({
           estado: "OK",
           fuente: "JUDICIAL",
@@ -1279,10 +1290,13 @@ function seleccionarYAbrirRadicado(radicado) {
         // adicional, no un reemplazo de su uso como guardia previa en
         // SELECCIONAR_RADICADO_JUDICIAL (mas abajo, sin cambios).
         NEXORA_LOG(`RETORNO_AL_LISTADO_POST_ACTUACIONES - iniciando para ${radicado}`);
+        registrarTrace("RETORNO_AL_LISTADO_POST_ACTUACIONES", radicado);
         volverAlListadoJudicial((resultadoRegreso) => {
           if (!resultadoRegreso.exito) {
             NEXORA_LOG(`${resultadoRegreso.motivo} - no se pudo regresar al listado tras actuaciones de ${radicado}`);
             enviarEstado(resultadoRegreso.motivo, `No se pudo confirmar el regreso al listado tras el proceso ${radicado}.`);
+            registrarTrace("ERROR", `${resultadoRegreso.motivo} radicado=${radicado}`);
+            registrarTrace("FINALIZACION", `estado_final=${resultadoRegreso.motivo} radicado=${radicado}`);
             return;
           }
           NEXORA_LOG(`LISTADO_JUDICIAL_RESTAURADO - tras actuaciones de ${radicado} (${resultadoRegreso.totalRadicados} radicado(s))`);
@@ -1290,6 +1304,8 @@ function seleccionarYAbrirRadicado(radicado) {
             "LISTADO_JUDICIAL_RESTAURADO",
             `${resultadoRegreso.totalRadicados} radicado(s) disponibles nuevamente en el listado.`
           );
+          registrarTrace("LISTADO_JUDICIAL_RESTAURADO", `${resultadoRegreso.totalRadicados} radicado(s)`);
+          registrarTrace("FINALIZACION", `estado_final=ACTUACIONES_OK radicado=${radicado}`);
         });
       });
     });

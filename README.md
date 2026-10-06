@@ -143,3 +143,52 @@ NO aplicada.
 
 Distinguir entre un estado simplemente ralentizado por throttling
 y un estado que no se resuelve mientras la pestaña está oculta.
+
+### DIAG-005 — NEXORA DEBUG GLOBAL
+
+**Estado:** EN INVESTIGACIÓN
+
+**Objetivo:**
+
+Instrumentar temporalmente RGM y Judicial para observar el
+comportamiento en primer y segundo plano.
+
+**Motivación:**
+
+Se observó una diferencia reproducible en Judicial según
+visibilidad y un comportamiento intermitente en RGM donde la
+página puede mostrar datos antes de que la extracción finalice.
+
+**Cambio:**
+
+- `content.js` (RGM): nueva función `registrarTraceRgm(evento, detalle)`
+  + panel Shadow DOM "NEXORA DEBUG — RGM TIMELINE", persistencia en
+  `chrome.storage.local["nexoraRgmTrace"]` (máx. 300 eventos). Eventos:
+  RGM_INICIO, RGM_DOCUMENTO_LISTO, RGM_FORMULARIO_DETECTADO (flujo de
+  respaldo), RGM_PLACA_ESCRITA (flujo de respaldo), RGM_CONSULTA_ENVIADA
+  (flujo de respaldo), RGM_ESPERANDO_RESULTADOS, RGM_RESULTADOS_DETECTADOS,
+  RGM_CONTROL_DETALLE_DETECTADO, RGM_ESPERANDO_DETALLE, RGM_DETALLE_ABIERTO,
+  RGM_TABLAS_DETALLE_DETECTADAS, RGM_EXTRACCION_INICIADA,
+  RGM_EXTRACCION_COMPLETADA, RGM_EXTRACCION_INCOMPLETA, RGM_TIMEOUT,
+  RGM_ERROR, RGM_FINALIZACION, más TIMER_PROGRAMADO/EJECUTADO y
+  OBSERVER_INICIADO/DETECTO_OBJETIVO/TIMEOUT en los 3 timers/observers
+  críticos (tabla de resultados, llegada en el mismo documento, tablas de
+  detalle), y NAVEGACION_INICIO/COMPLETADA.
+- `judicial.js`: se agregaron eventos adicionales (reutilizando
+  `registrarTrace` existente, sin tocarla) para cubrir Selección de
+  radicado/Detalle/Actuaciones/Retorno al listado, puntos que DIAG-001
+  no cubría todavía: RADICADO_VALIDADO, RADICADO_ABRIENDO,
+  DETALLE_DETECTADO, ACTUACIONES_ABRIENDO, ACTUACIONES_DETECTADAS,
+  ACTUACIONES_EXTRAYENDO, ACTUACIONES_EXTRAIDAS,
+  RETORNO_AL_LISTADO_POST_ACTUACIONES, LISTADO_JUDICIAL_RESTAURADO, ERROR,
+  FINALIZACION.
+
+**Alcance:** Solo diagnóstico.
+
+**Lógica funcional modificada:** NO.
+
+**Extractores modificados:** NO.
+
+**Timers funcionales modificados:** NO.
+
+**Reparación aplicada:** NO.

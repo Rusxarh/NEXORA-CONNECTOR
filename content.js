@@ -39,6 +39,139 @@ function enviarResultadoFinal(resultado) {
   chrome.runtime.sendMessage({ tipo: "RESULTADO_FINAL", resultado }).catch(() => {});
 }
 
+// =========================================================================
+// DIAG-005 — NEXORA DEBUG (RGM) — INSTRUMENTACION DIAGNOSTICA (NO funcional)
+//
+// Autorizada explicitamente para observar el comportamiento de RGM en
+// segundo plano (misma motivacion que DIAG-001/002/003/004 en judicial.js).
+// Esta seccion SOLO OBSERVA: no decide nada, no cambia ningun timer,
+// timeout, MutationObserver, selector, navegacion ni extractor existente.
+// Cada llamada a registrarTraceRgm() es una linea ADICIONAL junto al
+// codigo real, nunca un reemplazo de el.
+//
+// Replica el MISMO formato conceptual de judicial.js (registrarTrace +
+// panel Shadow DOM), pero como funcion PROPIA de este content script: RGM
+// y Judicial corren en dominios distintos, en instancias de script
+// separadas (manifest.json ya las declara como content_scripts
+// independientes, a proposito, sin compartir codigo) -- por eso no se
+// "importa" la funcion de judicial.js, se replica su formato.
+//
+// Persistencia: chrome.storage.local (permiso "storage" ya declarado en
+// manifest.json, sin cambios) bajo CLAVE_TRACE_RGM, con limite de
+// LIMITE_TRACE_RGM entradas (recorte FIFO). No se envia nada a Internet
+// ni a GitHub: solo queda en el storage local de la extension en este
+// navegador. No guarda contraseñas/cookies/tokens ni HTML completo.
+// =========================================================================
+
+const CLAVE_TRACE_RGM = "nexoraRgmTrace";
+const LIMITE_TRACE_RGM = 300;
+let nexoraRgmTracelineMemoria = [];
+let nexoraRgmPanelDebugShadow = null;
+
+function _formatearHoraTraceRgm(fecha) {
+  const dos = (n) => String(n).padStart(2, "0");
+  const tres = (n) => String(n).padStart(3, "0");
+  return `${dos(fecha.getHours())}:${dos(fecha.getMinutes())}:${dos(fecha.getSeconds())}.${tres(fecha.getMilliseconds())}`;
+}
+
+/**
+ * Registra UN evento de la timeline diagnostica de RGM. NO decide nada
+ * sobre el flujo real: solo observa y deja constancia (consola + memoria
+ * + chrome.storage.local + panel visual). Incluye los "campos comunes"
+ * pedidos (foco/visibilidad/activeElement) en cada entrada, a nivel de
+ * entrada completa (no anidados en "detalle"), ya que esta es
+ * instrumentacion NUEVA sin un formato previo que preservar (a diferencia
+ * de judicial.js, donde DIAG-001/002/003 ya existian y no se tocan).
+ */
+function registrarTraceRgm(evento, detalle) {
+  const ahora = new Date();
+  const activeEl = document.activeElement;
+  const entrada = {
+    timestamp: _formatearHoraTraceRgm(ahora),
+    perfNow: Math.round(performance.now() * 1000) / 1000,
+    modulo: "RGM",
+    evento,
+    detalle: detalle || null,
+    documentHasFocus: document.hasFocus(),
+    visibilityState: document.visibilityState,
+    documentHidden: document.hidden,
+    activeElementTag: activeEl ? activeEl.tagName : null,
+    activeElementType: activeEl ? activeEl.getAttribute("type") : null,
+  };
+
+  console.log(`[NEXORA-DIAG-RGM] ${entrada.timestamp} | ${evento}${detalle ? " | " + detalle : ""}`);
+
+  nexoraRgmTracelineMemoria.push(entrada);
+  if (nexoraRgmTracelineMemoria.length > LIMITE_TRACE_RGM) {
+    nexoraRgmTracelineMemoria = nexoraRgmTracelineMemoria.slice(-LIMITE_TRACE_RGM);
+  }
+
+  try {
+    chrome.storage.local.get(CLAVE_TRACE_RGM, (datos) => {
+      const previo = (datos && datos[CLAVE_TRACE_RGM]) || [];
+      const combinado = previo.concat([entrada]).slice(-LIMITE_TRACE_RGM);
+      chrome.storage.local.set({ [CLAVE_TRACE_RGM]: combinado });
+    });
+  } catch (e) {
+    // Si storage no esta disponible por alguna razon, el diagnostico no
+    // debe romper el flujo real: se ignora silenciosamente.
+  }
+
+  _actualizarPanelDebugRgm();
+}
+
+/**
+ * Panel visual MINIMO, aislado via Shadow DOM, fijo en una esquina, con
+ * pointer-events:none para garantizar que NUNCA intercepta un click
+ * destinado al sitio real. Puramente informativo. Mismo formato visual
+ * que el panel de Judicial (DIAG-001), en otra esquina para no competir
+ * si alguna vez ambas paginas coincidieran en la misma ventana.
+ */
+function _crearPanelDebugRgm() {
+  if (nexoraRgmPanelDebugShadow || !document.body) return;
+  const host = document.createElement("div");
+  host.id = "nexora-debug-rgm-host";
+  host.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:2147483647;pointer-events:none;";
+  document.body.appendChild(host);
+
+  const shadow = host.attachShadow({ mode: "open" });
+  const estilo = document.createElement("style");
+  estilo.textContent = `
+    .panel { font-family: monospace; font-size: 10px; line-height: 1.4; background: rgba(0,0,0,0.85);
+      color: #0ff; border: 1px solid #0ff; border-radius: 4px; padding: 6px 8px; max-width: 480px;
+      max-height: 220px; overflow: hidden; white-space: pre; }
+    .titulo { color: #ff0; font-weight: bold; margin-bottom: 4px; }
+    .estado { color: #fff; margin-bottom: 4px; }
+  `;
+  const contenedor = document.createElement("div");
+  contenedor.className = "panel";
+  contenedor.innerHTML =
+    '<div class="titulo">NEXORA DEBUG — RGM TIMELINE</div>' +
+    '<div class="estado" id="estadoActualRgm">Esperando...</div>' +
+    '<div id="lineasRgm"></div>';
+
+  shadow.appendChild(estilo);
+  shadow.appendChild(contenedor);
+  nexoraRgmPanelDebugShadow = shadow;
+}
+
+function _actualizarPanelDebugRgm() {
+  try {
+    _crearPanelDebugRgm();
+    if (!nexoraRgmPanelDebugShadow) return;
+    const lineas = nexoraRgmPanelDebugShadow.getElementById("lineasRgm");
+    const estadoActual = nexoraRgmPanelDebugShadow.getElementById("estadoActualRgm");
+    if (!lineas) return;
+    const ultimas = nexoraRgmTracelineMemoria.slice(-12);
+    lineas.textContent = ultimas.map((e) => `${e.timestamp} ${e.evento}${e.detalle ? " " + e.detalle : ""}`).join("\n");
+    if (estadoActual && nexoraRgmTracelineMemoria.length > 0) {
+      estadoActual.textContent = "Estado actual: " + nexoraRgmTracelineMemoria[nexoraRgmTracelineMemoria.length - 1].evento;
+    }
+  } catch (e) {
+    // Puramente visual: cualquier fallo aqui nunca debe propagarse al flujo real.
+  }
+}
+
 function normalizarTexto(s) {
   return (s || "")
     .normalize("NFD")
@@ -183,6 +316,7 @@ function describirDestino(el) {
 // =========================================================================
 
 function manejarAnalizarPaginaRGM(placa) {
+  registrarTraceRgm("RGM_INICIO", `placa="${placa}"`);
   enviarEstado("CONSULTANDO", "Analizando la pagina de ConsultaGarantia.aspx...");
 
   const TIMEOUT_MS = 15000;
@@ -197,6 +331,7 @@ function manejarAnalizarPaginaRGM(placa) {
       resuelto = true;
       enviarEstado("SIN_RESULTADO", "El RGM no reporto garantias para esta placa.");
       enviarResultadoFinal({ fuente: "RGM", placa_consultada: placa, estado: "SIN_RESULTADO", garantias: [] });
+      registrarTraceRgm("RGM_FINALIZACION", "estado_final=SIN_RESULTADO");
       return true;
     }
 
@@ -206,6 +341,8 @@ function manejarAnalizarPaginaRGM(placa) {
       NEXORA_LOG("RESULTADO_DETECTADO");
       NEXORA_LOG(`PLACA_CONSULTADA: ${placa}`);
       enviarEstado("RESULTADO_DETECTADO", "Tabla de resultados detectada (columnas coinciden con lo esperado).");
+      registrarTraceRgm("OBSERVER_DETECTO_OBJETIVO", "tabla_resultados");
+      registrarTraceRgm("RGM_RESULTADOS_DETECTADOS", `placa="${placa}"`);
       procesarTablaResultados(tabla, placa);
       return true;
     }
@@ -214,15 +351,23 @@ function manejarAnalizarPaginaRGM(placa) {
 
   if (intentarDetectar()) return;
 
+  registrarTraceRgm("RGM_ESPERANDO_RESULTADOS", `placa="${placa}"`);
+  registrarTraceRgm("OBSERVER_INICIADO", "tabla_resultados");
   const observer = new MutationObserver(() => {
     if (intentarDetectar()) observer.disconnect();
   });
   observer.observe(document.body, { childList: true, subtree: true });
 
+  registrarTraceRgm("TIMER_PROGRAMADO", `resultados timeout=${TIMEOUT_MS}ms`);
+  const _resultadosTimeoutProgramadoEn = performance.now();
   setTimeout(() => {
     if (resuelto) return;
     resuelto = true;
     observer.disconnect();
+    const _elapsed = Math.round(performance.now() - _resultadosTimeoutProgramadoEn);
+    registrarTraceRgm("TIMER_EJECUTADO", `resultados timeout programado=${TIMEOUT_MS}ms elapsed=${_elapsed}ms`);
+    registrarTraceRgm("OBSERVER_TIMEOUT", "tabla_resultados");
+    registrarTraceRgm("RGM_TIMEOUT", "RESULTADOS_TIMEOUT");
     NEXORA_LOG("Timeout esperando la tabla de resultados.");
     capturarSnapshotDesconocido(placa, "RESULTADOS_TIMEOUT");
   }, TIMEOUT_MS);
@@ -233,6 +378,7 @@ function procesarTablaResultados(tabla, placa) {
   if (filas.length === 0) {
     enviarEstado("SIN_RESULTADO", "La tabla de resultados no tiene filas de datos.");
     enviarResultadoFinal({ fuente: "RGM", placa_consultada: placa, estado: "SIN_RESULTADO", garantias: [] });
+    registrarTraceRgm("RGM_FINALIZACION", "estado_final=SIN_RESULTADO (tabla sin filas)");
     return;
   }
 
@@ -270,6 +416,7 @@ function procesarTablaResultados(tabla, placa) {
   NEXORA_LOG(`  estrategia_usada: ${estrategia}`);
   NEXORA_LOG(`  elemento: <${control.tagName.toLowerCase()}> title="${control.getAttribute("title") || ""}"`);
   NEXORA_LOG(`DESTINO_DETALLE: ${destino.tipo} -> ${destino.valor}`);
+  registrarTraceRgm("RGM_CONTROL_DETALLE_DETECTADO", `estrategia=${estrategia} destino=${destino.tipo}`);
 
   enviarEstado(
     "RESULTADO_DETECTADO",
@@ -291,6 +438,8 @@ function procesarTablaResultados(tabla, placa) {
     })
     .then(() => {
       enviarEstado("ABRIENDO_DETALLE", "Ejecutando clic real sobre el control de detalle...");
+      registrarTraceRgm("RGM_ESPERANDO_DETALLE", `placa="${placa}"`);
+      registrarTraceRgm("NAVEGACION_INICIO", "click control detalle");
       // Clic real: dejamos que sea el propio RGM quien decida como navegar
       // (href, __doPostBack, lo que sea). No reproducimos nada por nuestra
       // cuenta.
@@ -309,6 +458,7 @@ function observarLlegadaEnMismoDocumento(placa) {
   let resuelto = false;
   const urlOrigen = location.href;
 
+  registrarTraceRgm("OBSERVER_INICIADO", "llegada_mismo_documento");
   const observer = new MutationObserver(() => {
     if (resuelto) return;
     // Si seguimos en la misma URL pero el contenido cambio sustancialmente,
@@ -316,6 +466,7 @@ function observarLlegadaEnMismoDocumento(placa) {
     if (location.href === urlOrigen && (document.body.innerText || "").length > 300) {
       resuelto = true;
       observer.disconnect();
+      registrarTraceRgm("OBSERVER_DETECTO_OBJETIVO", "llegada_mismo_documento");
       chrome.storage.local.get("nexoraEsperandoDetalle", (datos) => {
         if (datos.nexoraEsperandoDetalle) evaluarLlegadaDetalle(placa);
       });
@@ -326,6 +477,7 @@ function observarLlegadaEnMismoDocumento(placa) {
   setTimeout(() => {
     if (resuelto) return;
     observer.disconnect();
+    registrarTraceRgm("OBSERVER_TIMEOUT", "llegada_mismo_documento (puede ser navegacion completa, no es error)");
     // Si no hubo cambio en el mismo documento, probablemente hubo una
     // navegacion completa: el chequeo al cargar la pagina nueva se encarga.
   }, TIMEOUT_MS);
@@ -373,21 +525,30 @@ function esperarTablasDetalleListas(callback) {
     if (tresTablasListas()) {
       resuelto = true;
       detener();
+      registrarTraceRgm("OBSERVER_DETECTO_OBJETIVO", "tablas_detalle");
+      registrarTraceRgm("RGM_TABLAS_DETALLE_DETECTADAS");
       callback(true);
     }
   };
 
   intentar();
   if (!resuelto) {
+    registrarTraceRgm("OBSERVER_INICIADO", "tablas_detalle");
     observer = new MutationObserver(() => intentar());
     observer.observe(document.body, { childList: true, subtree: true });
     intervalo = setInterval(intentar, INTERVALO_MS);
   }
 
+  registrarTraceRgm("TIMER_PROGRAMADO", `tablas_detalle timeout=${TIMEOUT_MS}ms`);
+  const _tablasTimeoutProgramadoEn = performance.now();
   setTimeout(() => {
     if (resuelto) return;
     resuelto = true;
     detener();
+    const _elapsed = Math.round(performance.now() - _tablasTimeoutProgramadoEn);
+    registrarTraceRgm("TIMER_EJECUTADO", `tablas_detalle timeout programado=${TIMEOUT_MS}ms elapsed=${_elapsed}ms`);
+    registrarTraceRgm("OBSERVER_TIMEOUT", "tablas_detalle");
+    registrarTraceRgm("RGM_TIMEOUT", "TABLAS_DETALLE_TIMEOUT");
     NEXORA_LOG("Timeout esperando gvDeudores/gvAcreedores/gvBienesSerial; se continua con la extraccion igual (comportamiento de error existente, sin cambios).");
     callback(false);
   }, TIMEOUT_MS);
@@ -397,6 +558,8 @@ function evaluarLlegadaDetalle(placa) {
   NEXORA_LOG("DETALLE_ABIERTO");
   NEXORA_LOG(`URL_DETALLE: ${location.href}`);
   NEXORA_LOG(`TITULO_DETALLE: ${document.title}`);
+  registrarTraceRgm("NAVEGACION_COMPLETADA", location.href);
+  registrarTraceRgm("RGM_DETALLE_ABIERTO", `placa="${placa}"`);
 
   chrome.storage.local.set({ nexoraEsperandoDetalle: null });
 
@@ -753,11 +916,15 @@ function extraerVehiculoReal() {
 }
 
 function extraerDatosDetalleReal(placaConsultada) {
+  registrarTraceRgm("RGM_EXTRACCION_INICIADA", `placa="${placaConsultada}"`);
   enviarEstado(
     "EXTRAYENDO_DATOS",
     "Extrayendo datos reales por ID de tabla (gvDeudores / gvAcreedores / gvBienesSerial)..."
   );
 
+  // Las 3 llamadas siguientes son a los extractores PROTEGIDOS, sin
+  // modificar: solo se registra el evento ANTES/DESPUES de invocarlos,
+  // nunca dentro de ellos.
   const deudor = extraerDeudorGaranteReal();
   const acreedor = extraerAcreedorReal();
   const vehiculo = extraerVehiculoReal();
@@ -817,10 +984,13 @@ function extraerDatosDetalleReal(placaConsultada) {
 
   if (estado === "OK") {
     enviarEstado("EXTRACCION_COMPLETADA", "Los tres bloques se extrajeron correctamente y la placa coincide.");
+    registrarTraceRgm("RGM_EXTRACCION_COMPLETADA", `placa="${placaConsultada}"`);
   } else {
     enviarEstado("EXTRACCION_INCOMPLETA", `Faltan: ${camposFaltantes.join(", ")}`);
+    registrarTraceRgm("RGM_EXTRACCION_INCOMPLETA", camposFaltantes.join(", "));
   }
   enviarResultadoFinal(resultado);
+  registrarTraceRgm("RGM_FINALIZACION", `estado_final=${estado}`);
 }
 
 // =========================================================================
@@ -1123,6 +1293,7 @@ function extraerYValidar(placa) {
 }
 
 function capturarSnapshotDesconocido(placa, motivo, extra) {
+  registrarTraceRgm("RGM_ERROR", `motivo=${motivo}`);
   enviarEstado("ESTRUCTURA_NO_RECONOCIDA", `Motivo: ${motivo}. Se guardo un snapshot de diagnostico.`);
   chrome.storage.local.set({
     ultimoSnapshotDesconocido: {
@@ -1143,6 +1314,7 @@ function capturarSnapshotDesconocido(placa, motivo, extra) {
     url: location.href,
     _nota: "Revisa 'ultimoSnapshotDesconocido' en chrome.storage.local para disenar los selectores reales.",
   });
+  registrarTraceRgm("RGM_FINALIZACION", `estado_final=ESTRUCTURA_NO_RECONOCIDA motivo=${motivo}`);
 }
 
 // =========================================================================
@@ -1158,9 +1330,14 @@ const SELECTORES_FORMULARIO = {
 };
 
 function detectarFormulario() {
+  // RGM_FORMULARIO_DETECTADO/RGM_PLACA_ESCRITA/RGM_CONSULTA_ENVIADA (DIAG-005)
+  // solo aplican a ESTE flujo de respaldo (v0.1 original, no usado por
+  // defecto): el flujo principal (manejarAnalizarPaginaRGM) navega
+  // directo por URL y nunca pasa por un formulario propio.
   const form = document.querySelector(SELECTORES_FORMULARIO.formularioNoOficial);
   if (form) {
     enviarEstado("FORMULARIO_DETECTADO", "Formulario de consulta no oficial encontrado (flujo de respaldo).");
+    registrarTraceRgm("RGM_FORMULARIO_DETECTADO", "flujo de respaldo");
     return form;
   }
   return null;
@@ -1172,6 +1349,7 @@ function completarYEnviarConsultaFormulario(placa) {
   const boton = document.querySelector(SELECTORES_FORMULARIO.botonConsultar);
   if (!radio || !input || !boton) {
     enviarEstado("ERROR", "No se encontraron todos los controles esperados del formulario (flujo de respaldo).");
+    registrarTraceRgm("RGM_ERROR", "controles del formulario de respaldo no encontrados");
     return;
   }
   radio.click();
@@ -1179,8 +1357,10 @@ function completarYEnviarConsultaFormulario(placa) {
     input.value = placa.toUpperCase().trim();
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
+    registrarTraceRgm("RGM_PLACA_ESCRITA", "flujo de respaldo");
     enviarEstado("CONSULTANDO", `(Respaldo) Enviando consulta para la placa ${placa}...`);
     boton.click();
+    registrarTraceRgm("RGM_CONSULTA_ENVIADA", "flujo de respaldo");
   }, 300);
 }
 
@@ -1228,3 +1408,5 @@ chrome.runtime.onMessage.addListener((mensaje, sender, sendResponse) => {
 })();
 
 NEXORA_LOG("Content script cargado en " + location.href);
+registrarTraceRgm("RGM_DOCUMENTO_LISTO", location.href);
+_crearPanelDebugRgm();
