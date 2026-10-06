@@ -82,3 +82,33 @@ NO aplicada.
 **Próxima prueba:**
 
 Repetir Caso A y analizar cada intento.
+
+### DIAG-003 — Diagnóstico de foco y visibilidad
+
+**Estado:** EN INVESTIGACIÓN
+
+**Objetivo:**
+
+Determinar si la diferencia entre Judicial activa e inactiva está
+relacionada con el foco real o el estado de visibilidad del documento.
+
+**Cambio:**
+
+Se agregan al evento VERIFICACION_NOMBRE los valores:
+
+- document.hasFocus()
+- document.visibilityState
+- document.hidden
+- document.activeElement
+
+**Lógica funcional modificada:**
+
+NO.
+
+**Reparación aplicada:**
+
+NO.
+
+**Próximo paso:**
+
+Comparar Caso A y Caso B.

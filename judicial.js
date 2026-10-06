@@ -548,6 +548,11 @@ function escribirNombreYVerificar(campoNombre, nombre, callback) {
     // ESTE intento antes de evaluar exito/fracaso, para poder reconstruir
     // despues cual condicion (valorConservado o sinErrorVisible) fue la
     // que impidio NOMBRE_ESCRITO en segundo plano.
+    // DIAG-003 (diagnostico, NO decide nada): foco/visibilidad del documento
+    // en ESTE instante, para contrastar la hipotesis de que la revalidacion
+    // de Vuetify dependa de un blur/foco real (document.hasFocus()) o de
+    // que la pestaña este visible (document.visibilityState/hidden).
+    const activeEl = document.activeElement;
     registrarTrace(
       "VERIFICACION_NOMBRE",
       JSON.stringify({
@@ -558,6 +563,13 @@ function escribirNombreYVerificar(campoNombre, nombre, callback) {
         sinErrorVisible,
         mensajeErrorPresente: !!mensajeError,
         mensajeErrorTexto: mensajeError ? limpiarTexto(mensajeError.textContent) : null,
+        documentHasFocus: document.hasFocus(),
+        visibilityState: document.visibilityState,
+        documentHidden: document.hidden,
+        activeElementTag: activeEl ? activeEl.tagName : null,
+        activeElementType: activeEl ? activeEl.getAttribute("type") : null,
+        activeElementName: activeEl ? activeEl.getAttribute("name") : null,
+        activeElementId: activeEl ? activeEl.id : null,
       })
     );
 
