@@ -192,3 +192,45 @@ página puede mostrar datos antes de que la extracción finalice.
 **Timers funcionales modificados:** NO.
 
 **Reparación aplicada:** NO.
+
+# REPARACIÓN-001 — Sincronización del input Judicial
+
+**Problema:**
+
+El DOM conserva correctamente el nombre, pero cuando la pestaña está
+oculta el estado de validación no se sincroniza.
+
+**Evidencia:**
+
+DIAG-004 registró 41 verificaciones sin que `sinErrorVisible` pasara a
+`true`.
+
+**Causa técnica:**
+
+No confirmada con certeza (Vuetify/Vue remoto no es observable desde este
+código). Lo único demostrable: dos puntos del mecanismo de disparo de
+eventos eran menos "reales" que lo que un navegador genera ante tecleo
+humano — (1) el evento `input` se construía como `Event` genérico, sin
+`inputType`/`data`; (2) `.blur()` depende de que el elemento esté
+realmente enfocado, algo no garantizado en el documento de una pestaña en
+segundo plano (`document.hasFocus()=false` confirmado en Caso A, AUDITORÍA-003).
+
+**Solución:**
+
+En `escribirNombreYVerificar`: el valor se asigna vía el setter nativo
+de `HTMLInputElement.prototype` en vez de asignación directa; el evento
+`input` se reconstruye como `InputEvent` real (`inputType:"insertText"`,
+`data`); `.blur()` se sustituye por el despacho explícito de `blur` y
+`focusout`. `change`, `focus()`, `valorConservado`, `sinErrorVisible`, la
+condición de éxito y los timers/número de intentos NO se modificaron.
+
+**Archivos:** `judicial.js` únicamente (`escribirNombreYVerificar`).
+
+**Riesgos:** si la causa real es un mecanismo de renderizado/transición de
+Vuetify suspendido mientras la pestaña está oculta (hipótesis más
+probable según AUDITORÍA-003/004, no confirmada), este cambio no la
+resolvería — no hay ningún evento que este script pueda despachar para
+forzar un repintado que el navegador decide no hacer en una pestaña
+oculta.
+
+**Estado:** REPARACIÓN IMPLEMENTADA — PENDIENTE DE VALIDACIÓN

@@ -530,10 +530,30 @@ function esperarBotonConsultarInteractuable(callback) {
 function escribirNombreYVerificar(campoNombre, nombre, callback) {
   const valor = nombre.toUpperCase().trim();
   campoNombre.focus();
-  campoNombre.value = valor;
-  campoNombre.dispatchEvent(new Event("input", { bubbles: true }));
+
+  // REPARACION-001 (autorizada, evidencia DIAG-001/002/003/004): el valor
+  // se asigna via el setter NATIVO del prototipo HTMLInputElement (en vez
+  // de asignacion directa), para descartar cualquier intermediario entre
+  // .value y lo que el framework observa. El evento "input" se reconstruye
+  // como InputEvent real (inputType/data), igual que lo genera un
+  // navegador ante tecleo real -- un Event generico (lo anterior) carece
+  // de esas propiedades. "change" NO se modifica: ya es un Event simple,
+  // igual al nativo real. El .blur() nativo se sustituye por el despacho
+  // EXPLICITO de los dos eventos reales que produce una perdida de foco
+  // genuina (blur sin burbujeo, focusout con burbujeo): .blur() depende de
+  // que el elemento este realmente enfocado, algo no garantizado en el
+  // documento de una pestaña en segundo plano (ver AUDITORIA-003:
+  // document.hasFocus()=false en Caso A); dispatchEvent entrega el evento
+  // a los listeners sin depender de eso. focus() se mantiene igual: no
+  // existe un equivalente de "solo evento" para mover document.activeElement.
+  const setterNativoValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+  setterNativoValue.call(campoNombre, valor);
+  campoNombre.dispatchEvent(
+    new InputEvent("input", { bubbles: true, cancelable: false, data: valor, inputType: "insertText" })
+  );
   campoNombre.dispatchEvent(new Event("change", { bubbles: true }));
-  campoNombre.blur();
+  campoNombre.dispatchEvent(new FocusEvent("blur", { bubbles: false, cancelable: false }));
+  campoNombre.dispatchEvent(new FocusEvent("focusout", { bubbles: true, cancelable: false }));
 
   const contenedorCampo = campoNombre.closest(".v-input") || campoNombre.parentElement;
 
