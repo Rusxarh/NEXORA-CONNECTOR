@@ -112,3 +112,34 @@ NO.
 **Próximo paso:**
 
 Comparar Caso A y Caso B.
+
+### DIAG-004 — Ampliación del presupuesto de verificación
+
+**Estado:** EN INVESTIGACIÓN
+
+**Objetivo:**
+
+Determinar si el estado de validación de Judicial se resuelve
+eventualmente en segundo plano cuando se proporciona suficiente
+tiempo real.
+
+**Cambio diagnóstico:**
+
+Máximo de verificaciones aumentado de 10 a 40.
+
+**Lógica de éxito:**
+
+SIN CAMBIOS.
+
+**Validación:**
+
+SIN CAMBIOS.
+
+**Reparación:**
+
+NO aplicada.
+
+**Hipótesis:**
+
+Distinguir entre un estado simplemente ralentizado por throttling
+y un estado que no se resuelve mientras la pestaña está oculta.

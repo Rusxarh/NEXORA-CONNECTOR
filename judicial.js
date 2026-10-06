@@ -577,7 +577,11 @@ function escribirNombreYVerificar(campoNombre, nombre, callback) {
       callback({ exito: true, motivo: null, valor });
       return;
     }
-    if (verificaciones > 10) {
+    if (verificaciones > 40) {
+      // DIAG-004 (diagnostico, autorizado): presupuesto ampliado de 10 a 40
+      // intentos UNICAMENTE para determinar si el estado de validacion
+      // eventualmente se resuelve con mas tiempo real en segundo plano.
+      // Ningun otro valor de esta funcion cambia.
       callback({
         exito: false,
         motivo: "NOMBRE_NO_VALIDADO",
