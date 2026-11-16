@@ -315,6 +315,17 @@ const ESTADOS_CONSULTA = Object.freeze({
   CONSULTA_CANCELADA: "CONSULTA_CANCELADA",
 });
 
+// Alcance de una consulta externa (rama alcance-rgm, pedido de NEXORA
+// FASE 6/7). Ausente o invalido en el mensaje = "COMPLETO": el
+// comportamiento exacto de siempre (RGM y, si entrega un nombre util,
+// Judicial a continuacion). Cambio aditivo y compatible: ningun llamador
+// que no envie "alcance" nota ninguna diferencia.
+const ALCANCES_CONSULTA_EXTERNA = Object.freeze({
+  RGM: "RGM",
+  JUDICIAL: "JUDICIAL",
+  COMPLETO: "COMPLETO",
+});
+
 // Estados finales: una consulta en uno de estos ya no cambia mas.
 const ESTADOS_TERMINALES = new Set([
   ESTADOS_CONSULTA.CONSULTA_COMPLETADA,
@@ -381,6 +392,8 @@ function serializarConsultaParaStorage(c) {
   return {
     consultaId: c.consultaId,
     placaOrigen: c.placaOrigen,
+    alcance: c.alcance,
+    judicialDirecto: c.judicialDirecto,
     estado: c.estado,
     rgm: c.rgm,
     judicial: c.judicial,
@@ -557,6 +570,7 @@ function consultaPublica(consulta) {
   return {
     consultaId: consulta.consultaId,
     placaOrigen: consulta.placaOrigen,
+    alcance: consulta.alcance,
     estado: consulta.estado,
     rgm: consulta.rgm,
     judicial: consulta.judicial,
@@ -564,13 +578,15 @@ function consultaPublica(consulta) {
   };
 }
 
-async function crearConsultaExterna(placaOrigen) {
+async function crearConsultaExterna(placaOrigen, alcance, judicialDirecto) {
   limpiarConsultasTerminadas();
 
   const consultaId = crypto.randomUUID();
   const consulta = {
     consultaId,
     placaOrigen,
+    alcance: alcance || ALCANCES_CONSULTA_EXTERNA.COMPLETO,
+    judicialDirecto: judicialDirecto || null,
     estado: ESTADOS_CONSULTA.RECIBIDA,
     rgm: null,
     judicial: null,
@@ -735,6 +751,14 @@ async function continuarConsultaExternaTrasRgm(consulta, resultadoRgm) {
 
   await emitirEvento(consultaId, rgmOk ? ESTADOS_CONSULTA.RGM_COMPLETADO : ESTADOS_CONSULTA.RGM_INCOMPLETO, { rgm: consulta.rgm });
 
+  // Alcance "RGM" (rama alcance-rgm): termina AQUI siempre, nunca
+  // encadena Judicial -- a diferencia de "COMPLETO" (el bloque de abajo,
+  // comportamiento original exacto, sin cambios).
+  if (consulta.alcance === ALCANCES_CONSULTA_EXTERNA.RGM) {
+    await finalizarConsultaExterna(consultaId, ESTADOS_CONSULTA.CONSULTA_COMPLETADA);
+    return;
+  }
+
   // Regla funcional aprobada (seccion 6, encargo anterior): si RGM
   // obtuvo el NOMBRE, Judicial continua aunque algun otro campo de RGM
   // este incompleto -- NO se exige rgmOk === true, solo nombre utilizable.
@@ -762,6 +786,12 @@ async function continuarConsultaExternaTrasRgm(consulta, resultadoRgm) {
 async function procesarConsultaExterna(consulta) {
   const consultaId = consulta.consultaId;
 
+  // Alcance "JUDICIAL" (rama alcance-rgm): sin pasar por RGM en absoluto,
+  // usando el nombre que ya llego en el mensaje externo.
+  if (consulta.alcance === ALCANCES_CONSULTA_EXTERNA.JUDICIAL) {
+    return procesarConsultaExternaJudicialDirecta(consulta);
+  }
+
   await emitirEvento(consultaId, ESTADOS_CONSULTA.RGM_EN_PROCESO);
 
   const esperaResultadoRgm = esperarProximoResultadoFinal(); // protegida
@@ -778,6 +808,34 @@ async function procesarConsultaExterna(consulta) {
   await continuarConsultaExternaTrasRgm(consulta, resultadoRgm);
 }
 
+// Alcance "JUDICIAL" (rama alcance-rgm, pedido de NEXORA FASE 6/7): arranca
+// Judicial directo con el nombre recibido, SIN tocar judicial.js -- reusa
+// exactamente la misma forma de abrir Judicial que
+// continuarConsultaExternaTrasRgm (iniciarConsultaJudicial, protegida),
+// solo que entrando directo en vez de despues de RGM. "documento" (si
+// vino en el mensaje) se guarda en consulta.judicialDirecto para
+// referencia, pero el buscador real de Consulta Judicial solo busca por
+// nombre/razon social -- no se modifico judicial.js para aceptar un
+// numero de documento, no existe ese campo en el formulario real.
+async function procesarConsultaExternaJudicialDirecta(consulta) {
+  const consultaId = consulta.consultaId;
+  const nombre = (consulta.judicialDirecto && consulta.judicialDirecto.nombre) || "";
+
+  await emitirEvento(consultaId, ESTADOS_CONSULTA.JUDICIAL_EN_PROCESO, {
+    judicial: { estado: "EN_PROCESO", nombreBuscado: nombre, procesos: [], procesoSeleccionado: null },
+  });
+
+  await iniciarConsultaJudicial(nombre); // protegida
+
+  consulta.tabJudicial = tabJudicialActual;
+  consultaIdPorTabJudicial.set(tabJudicialActual, consultaId);
+  await guardarEstado();
+
+  // Termina aqui: el listado llega async por RESULTADO_FINAL (mismo
+  // listener de siempre, sin cambios); finalizarConsultaExterna() la
+  // cerrara cuando corresponda, igual que en el flujo COMPLETO.
+}
+
 chrome.runtime.onMessageExternal.addListener((mensaje, sender, sendResponse) => {
   if (!mensaje || mensaje.accion !== "CONSULTAR_PLACA") {
     return false; // no es para este listener; no se responde nada.
@@ -788,6 +846,27 @@ chrome.runtime.onMessageExternal.addListener((mensaje, sender, sendResponse) => 
 
 async function manejarConsultarPlacaExterna(mensaje, sendResponse) {
   await estadoListo; // nunca crear una consulta antes de rehidratar el estado previo
+
+  // Alcance (rama alcance-rgm): ausente o invalido => "COMPLETO", el
+  // comportamiento de siempre. Cambio aditivo: un llamador que nunca
+  // manda "alcance" (por ejemplo el Puente de Prueba) no nota nada distinto.
+  const alcanceCrudo = typeof mensaje.alcance === "string" ? mensaje.alcance.trim().toUpperCase() : "";
+  const alcance = Object.values(ALCANCES_CONSULTA_EXTERNA).includes(alcanceCrudo)
+    ? alcanceCrudo
+    : ALCANCES_CONSULTA_EXTERNA.COMPLETO;
+
+  if (alcance === ALCANCES_CONSULTA_EXTERNA.JUDICIAL) {
+    const nombre = typeof mensaje.nombre === "string" ? mensaje.nombre.trim() : "";
+    if (!nombre) {
+      sendResponse({ ok: false, motivo: "NOMBRE_REQUERIDO_PARA_JUDICIAL" });
+      return;
+    }
+    const documento = typeof mensaje.documento === "string" && mensaje.documento.trim() ? mensaje.documento.trim() : null;
+    const consulta = await crearConsultaExterna(null, alcance, { nombre, documento });
+    sendResponse({ ok: true, consultaId: consulta.consultaId, estado: ESTADOS_CONSULTA.RECIBIDA, alcance });
+    await encolarConsultaExterna(consulta.consultaId);
+    return;
+  }
 
   const placaCruda = mensaje.placa;
   if (!placaCruda || typeof placaCruda !== "string" || !placaCruda.trim()) {
@@ -803,8 +882,8 @@ async function manejarConsultarPlacaExterna(mensaje, sendResponse) {
     return;
   }
 
-  const consulta = await crearConsultaExterna(placa);
-  sendResponse({ ok: true, consultaId: consulta.consultaId, estado: ESTADOS_CONSULTA.RECIBIDA, placa });
+  const consulta = await crearConsultaExterna(placa, alcance);
+  sendResponse({ ok: true, consultaId: consulta.consultaId, estado: ESTADOS_CONSULTA.RECIBIDA, placa, alcance });
 
   await encolarConsultaExterna(consulta.consultaId);
 }
