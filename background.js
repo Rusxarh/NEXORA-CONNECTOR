@@ -837,6 +837,15 @@ async function procesarConsultaExternaJudicialDirecta(consulta) {
 }
 
 chrome.runtime.onMessageExternal.addListener((mensaje, sender, sendResponse) => {
+  // "PING": chequeo de disponibilidad para la Web (pedido tras una prueba
+  // real donde Consulta mandaba el latido de trabajador -- y el servidor
+  // creia que si habia alguien atendiendo la cola -- sin comprobar nunca
+  // si la extension de verdad respondia). Responde sincrono, sin tocar
+  // ningun estado de consulta ni esperar estadoListo.
+  if (mensaje && mensaje.accion === "PING") {
+    sendResponse({ ok: true });
+    return false;
+  }
   if (!mensaje || mensaje.accion !== "CONSULTAR_PLACA") {
     return false; // no es para este listener; no se responde nada.
   }
