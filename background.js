@@ -41,6 +41,56 @@ let resolverEsperaRgm = null;
 // Judicial desde el popup).
 let placaOrigenPendiente = null;
 
+// Diagnostico de la prueba real (NEXORA, rama alcance-rgm): una consulta
+// PEDIDA DESDE /consulta con alcance "RGM" abria el portal pero el
+// NEXORA DEBUG de la pestana se quedaba en "RGM_DOCUMENTO_LISTO" (content.js
+// recien cargado) sin avanzar nunca a "RGM_INICIO" -- es decir,
+// ANALIZAR_PAGINA_RGM nunca llego a procesarse en esa pestana, aunque
+// iniciarConsulta() es la MISMA funcion que usa el popup (que si funciona).
+// Causa real encontrada: iniciarConsulta() mandaba chrome.tabs.sendMessage
+// SIN CALLBACK y sin verificar chrome.runtime.lastError -- si el mensaje
+// se perdia (pestana todavia navegando/redirigiendo en el instante exacto
+// del envio, algo mas facil de que pase en una pestana en SEGUNDO PLANO,
+// donde Chrome puede demorar mas el pintado/montaje inicial de la pagina
+// que en una pestana activa), nadie se enteraba ni reintentaba: la
+// consulta se quedaba colgada para siempre en RGM_EN_PROCESO.
+// Arreglo (ver iniciarConsulta): reintentos con ack real, y la pestana se
+// activa SOLO durante la extraccion de una consulta EXTERNA (nunca para
+// el popup, que ya funcionaba con la pestana en segundo plano).
+let tabActivaAntesDeConsultaExterna = null;
+
+/**
+ * Espejo, del lado del Service Worker, de registrarTraceRgm() (content.js):
+ * misma clave de storage (CLAVE_TRACE_RGM mas abajo en content.js,
+ * "nexoraRgmTrace"), para que el camino EXTERNO (background.js) quede en
+ * la MISMA linea de tiempo que las trazas de la pagina -- antes, un
+ * problema como el de arriba solo se podia diagnosticar mirando la
+ * pestana por fuera (estado RGM_EN_PROCESO colgado en /consulta) sin
+ * ninguna pista de que paso (o no paso) del lado del Connector.
+ */
+function registrarTraceRgmExterno(evento, detalle) {
+  try {
+    const ahora = new Date();
+    const dos = (n) => String(n).padStart(2, "0");
+    const tres = (n) => String(n).padStart(3, "0");
+    const entrada = {
+      timestamp: `${dos(ahora.getHours())}:${dos(ahora.getMinutes())}:${dos(ahora.getSeconds())}.${tres(ahora.getMilliseconds())}`,
+      perfNow: Math.round(performance.now() * 1000) / 1000,
+      modulo: "RGM_EXTERNO",
+      evento,
+      detalle: detalle || null,
+    };
+    console.log(`[NEXORA-DIAG-RGM-EXTERNO] ${entrada.timestamp} | ${evento}${detalle ? " | " + detalle : ""}`);
+    chrome.storage.local.get("nexoraRgmTrace", (datos) => {
+      const previo = (datos && datos.nexoraRgmTrace) || [];
+      const combinado = previo.concat([entrada]).slice(-300);
+      chrome.storage.local.set({ nexoraRgmTrace: combinado });
+    });
+  } catch (e) {
+    // El diagnostico nunca debe romper el flujo real.
+  }
+}
+
 chrome.runtime.onMessage.addListener((mensaje, sender, sendResponse) => {
   if (mensaje.tipo === "INICIAR_CONSULTA_RGM") {
     iniciarConsulta(mensaje.placa);
@@ -618,6 +668,21 @@ async function finalizarConsultaExterna(consultaId, estadoFinal) {
     await finalizarConsultaCompleta(); // protegida, sin modificar
   }
 
+  // Devuelve el foco a la pestana que el usuario tenia activa antes de
+  // esta consulta externa (solo se activo la pestana RGM para esta
+  // consulta -- ver iniciarConsulta/opciones.activarMientrasExtrae).
+  // chrome.tabs.update falla en silencio (try/catch) si esa pestana ya
+  // no existe (el usuario la cerro mientras tanto): no es un error fatal.
+  if (tabActivaAntesDeConsultaExterna !== null) {
+    const tabARestaurar = tabActivaAntesDeConsultaExterna;
+    tabActivaAntesDeConsultaExterna = null;
+    try {
+      await chrome.tabs.update(tabARestaurar, { active: true });
+    } catch (e) {
+      // La pestana original ya no existe; no hay nada que restaurar.
+    }
+  }
+
   await emitirEvento(consultaId, estadoFinal);
 
   if (consulta._resolverFin) {
@@ -783,6 +848,14 @@ async function continuarConsultaExternaTrasRgm(consulta, resultadoRgm) {
   // finalizarConsultaExterna() la cerrara cuando corresponda.
 }
 
+// Prueba real: sin este limite, una consulta externa que se quedara
+// colgada en el portal (ver nota de iniciarConsulta/EXTERNO_RGM_TIMEOUT)
+// se quedaba en RGM_EN_PROCESO para siempre -- nunca CONSULTA_ERROR, y la
+// cola nunca quedaba libre para atender la siguiente. A los 2 min sin
+// resultado, termina con un motivo claro (visible en "Ultimas 20" de
+// /consulta vía consulta.errores).
+const TIMEOUT_CONSULTA_EXTERNA_RGM_MS = 2 * 60 * 1000;
+
 async function procesarConsultaExterna(consulta) {
   const consultaId = consulta.consultaId;
 
@@ -793,9 +866,12 @@ async function procesarConsultaExterna(consulta) {
   }
 
   await emitirEvento(consultaId, ESTADOS_CONSULTA.RGM_EN_PROCESO);
+  registrarTraceRgmExterno("EXTERNO_CONSULTA_RGM_EN_PROCESO", `consultaId=${consultaId} placa="${consulta.placaOrigen}"`);
 
   const esperaResultadoRgm = esperarProximoResultadoFinal(); // protegida
-  await iniciarConsulta(consulta.placaOrigen); // protegida
+  // activarMientrasExtrae=true: causa real de la prueba real (ver nota en
+  // iniciarConsulta) -- SOLO para consultas externas, el popup no cambia.
+  await iniciarConsulta(consulta.placaOrigen, { activarMientrasExtrae: true });
 
   // Seguro: las consultas externas se procesan una a la vez, asi que
   // tabRgmActual contiene aqui exactamente la pestana que esta llamada
@@ -804,7 +880,25 @@ async function procesarConsultaExterna(consulta) {
   consultaIdPorTabRgm.set(tabRgmActual, consultaId);
   await guardarEstado();
 
+  let yaResuelta = false;
+  const idTimeout = setTimeout(async () => {
+    if (yaResuelta) return;
+    yaResuelta = true;
+    const motivo = `TIMEOUT_RGM_2MIN (se quedo colgada sin resultado final -- revisa el NEXORA DEBUG de la pestana; placa="${consulta.placaOrigen}")`;
+    registrarTraceRgmExterno("EXTERNO_RGM_TIMEOUT", `consultaId=${consultaId} ${motivo}`);
+    consulta.errores.push(motivo);
+    await finalizarConsultaExterna(consultaId, ESTADOS_CONSULTA.CONSULTA_ERROR);
+    if (resolverEsperaRgm) {
+      const resolver = resolverEsperaRgm;
+      resolverEsperaRgm = null;
+      resolver(null);
+    }
+  }, TIMEOUT_CONSULTA_EXTERNA_RGM_MS);
+
   const resultadoRgm = await esperaResultadoRgm;
+  if (yaResuelta) return; // el timeout ya cerro esta consulta: no procesar un resultado tardio
+  yaResuelta = true;
+  clearTimeout(idTimeout);
   await continuarConsultaExternaTrasRgm(consulta, resultadoRgm);
 }
 
@@ -1063,7 +1157,48 @@ async function publicarEstado(estado, detalle) {
   });
 }
 
-async function iniciarConsulta(placaCruda) {
+// Reintentos de ANALIZAR_PAGINA_RGM con ack real (chrome.runtime.lastError):
+// antes, iniciarConsulta() mandaba el mensaje una sola vez, sin callback,
+// asi que si se perdia (pestana todavia navegando/montando en ese instante)
+// nadie se enteraba y la consulta se quedaba colgada para siempre en
+// RGM_EN_PROCESO (ver nota junto a tabActivaAntesDeConsultaExterna). Solo
+// se usa en el camino EXTERNO (ver iniciarConsulta): el popup sigue
+// mandando el mensaje tal cual lo hacia antes, sin tocar su comportamiento
+// ya validado.
+const INTENTOS_ENVIO_ANALIZAR_RGM = 4;
+const ESPERA_ENTRE_INTENTOS_ANALIZAR_RGM_MS = 700;
+
+function enviarAnalizarPaginaRgmConReintentos(tabId, placa, intento) {
+  intento = intento || 1;
+  chrome.tabs.sendMessage(tabId, { tipo: "ANALIZAR_PAGINA_RGM", placa }, (respuesta) => {
+    const error = chrome.runtime.lastError;
+    if (error) {
+      registrarTraceRgmExterno(
+        "EXTERNO_ENVIO_FALLIDO",
+        `intento=${intento}/${INTENTOS_ENVIO_ANALIZAR_RGM} tabId=${tabId} placa="${placa}" error="${error.message}"`
+      );
+      if (intento < INTENTOS_ENVIO_ANALIZAR_RGM) {
+        setTimeout(
+          () => enviarAnalizarPaginaRgmConReintentos(tabId, placa, intento + 1),
+          ESPERA_ENTRE_INTENTOS_ANALIZAR_RGM_MS
+        );
+      } else {
+        registrarTraceRgmExterno(
+          "EXTERNO_ENVIO_AGOTADO",
+          `tabId=${tabId} placa="${placa}" tras ${INTENTOS_ENVIO_ANALIZAR_RGM} intentos sin ack`
+        );
+      }
+      return;
+    }
+    registrarTraceRgmExterno(
+      "EXTERNO_ENVIO_CONFIRMADO",
+      `intento=${intento} tabId=${tabId} placa="${placa}" respuesta=${JSON.stringify(respuesta || null)}`
+    );
+  });
+}
+
+async function iniciarConsulta(placaCruda, opciones) {
+  opciones = opciones || {};
   await chrome.storage.local.set({ resultadoFinal: null });
   await publicarEstado("VALIDANDO_PLACA", `Validando "${placaCruda}"...`);
 
@@ -1079,19 +1214,41 @@ async function iniciarConsulta(placaCruda) {
   const url = construirUrlConsultaGarantia(placa);
   await publicarEstado("ABRIENDO_RGM", `Abriendo ${url}`);
 
-  // UX (autorizado): la pestana de trabajo RGM se crea INACTIVA -- NEXORA
-  // (la pestana del usuario) nunca pierde el foco por esto. No se cambia
-  // la URL ni el resto del flujo, solo este unico parametro.
-  const tab = await chrome.tabs.create({ url, active: false });
+  if (opciones.activarMientrasExtrae) {
+    try {
+      const [actual] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      tabActivaAntesDeConsultaExterna = actual ? actual.id : null;
+    } catch (e) {
+      tabActivaAntesDeConsultaExterna = null;
+    }
+    registrarTraceRgmExterno("EXTERNO_RGM_INICIO", `placa="${placa}" pestana_previa=${tabActivaAntesDeConsultaExterna}`);
+  }
+
+  // UX (autorizado): la pestana de trabajo RGM se crea INACTIVA para el
+  // popup -- NEXORA nunca pierde el foco por esto, SIN CAMBIOS. Causa real
+  // encontrada en la prueba real con una consulta EXTERNA: el portal
+  // tardaba en terminar de montar/redirigir en segundo plano y el mensaje
+  // ANALIZAR_PAGINA_RGM se perdia sin que nadie lo notara. Para una
+  // consulta externa (opciones.activarMientrasExtrae) la pestana se crea
+  // ACTIVA mientras dura la extraccion; finalizarConsultaExterna restaura
+  // la pestana que el usuario tenia activa en cuanto esta consulta termina.
+  const tab = await chrome.tabs.create({ url, active: !!opciones.activarMientrasExtrae });
   tabRgmActual = tab.id;
 
-  const listener = (tabId, changeInfo) => {
+  const listener = (tabId, changeInfo, tabInfo) => {
     if (tabId === tab.id && changeInfo.status === "complete") {
       chrome.tabs.onUpdated.removeListener(listener);
+      if (opciones.activarMientrasExtrae) {
+        registrarTraceRgmExterno("EXTERNO_PESTANA_COMPLETA", `tabId=${tabId} url="${(tabInfo && tabInfo.url) || ""}"`);
+      }
       // Pequena espera adicional por si la pagina sigue cargando contenido
       // via JS/AJAX tras el evento "complete".
       setTimeout(() => {
-        chrome.tabs.sendMessage(tab.id, { tipo: "ANALIZAR_PAGINA_RGM", placa });
+        if (opciones.activarMientrasExtrae) {
+          enviarAnalizarPaginaRgmConReintentos(tab.id, placa, 1);
+        } else {
+          chrome.tabs.sendMessage(tab.id, { tipo: "ANALIZAR_PAGINA_RGM", placa });
+        }
       }, 500);
     }
   };
