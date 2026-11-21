@@ -234,3 +234,56 @@ forzar un repintado que el navegador decide no hacer en una pestaña
 oculta.
 
 **Estado:** REPARACIÓN IMPLEMENTADA — PENDIENTE DE VALIDACIÓN
+
+# v0.2.0 — Prompt 8b punto 1: RGM externo ya no roba el foco
+
+**Problema (prueba real, Fase 18):** cada consulta RGM automática
+(cámara/Telegram/estudio/panel, atendida mientras `/consulta` está
+abierta) activaba una pestaña (`active: true`) en la ventana ACTUAL del
+usuario — "la pestaña del portal" que Gabriel veía abrirse y le robaba el
+foco, aunque esa pestaña fuera inactiva para el popup manual.
+
+**Causa real:** `iniciarConsulta()` solo tenía un camino: abrir la
+pestaña en la ventana actual, activa o no (`active: !!opciones.activarMientrasExtrae`).
+No existe ningún "plan A" (consultar sin pestaña, con `fetch()` desde el
+service worker) — ver `MOTIVO_SIN_PLAN_A` en `background.js`: la página
+de resultados de `ConsultaGarantia.aspx` depende de un postback ASP.NET
+(`__VIEWSTATE`) que `content.js` espera con `MutationObserver` (no llega
+en el HTML inicial de una sola petición GET/POST), y automatizarlo sin
+poder probarlo contra el portal real es justo lo que CLAUDE.md prohíbe.
+
+**Decisión (anotada):** mientras no haya plan A, toda consulta externa
+queda marcada `plan: "B"` con el motivo exacto, visible en
+`/consulta/diagnostico` (NEXORA-CONTROL). Para que el plan B no robe el
+foco: la pestaña de trabajo se abre en una **ventana aparte**
+(`chrome.windows.create`), `focused: false` y posicionada fuera del área
+visible (`left/top: -32000`), en vez de minimizada. Se prefirió "fuera de
+pantalla" sobre "minimizada" porque una ventana minimizada pone sus
+pestañas en `visibilityState: 'hidden'` (el navegador limita sus
+temporizadores, el mismo mecanismo que causaba el "mensaje perdido" que
+`active: true` evitaba, y el mismo riesgo que REPARACIÓN-001 ya documentó
+para páginas que dependen de que la pestaña esté "visible"/enfocada).
+Fuera de pantalla pero no minimizada, la pestaña sigue siendo la pestaña
+activa de su propia ventana (no debería entrar en el modo "oculto").
+
+**No se implementó (y por qué):** un verdadero "plan A" por `fetch()`
+sin pestaña, porque exige reproducir el postback ASP.NET real
+(`__VIEWSTATE`/`__EVENTVALIDATION`) y el servicio worker ni siquiera
+tiene `DOMParser` disponible para leer la respuesta -- no se puede
+construir ni validar sin probarlo contra `garantiasmobiliarias.com.co`
+de verdad, algo que este cambio no hizo (regla de CLAUDE.md). Si Gabriel
+quiere avanzar en esto, el siguiente paso es capturar con las DevTools
+(pestaña Red) una consulta manual real y pasar esa captura (sin datos
+reales) para construir el postback a partir de un caso conocido, no de
+una suposición.
+
+**Archivos:** `manifest.json` (versión 0.1.0 → 0.2.0), `background.js`
+(`iniciarConsulta`, `procesarConsultaExterna`, `consultaPublica`, PING).
+
+**Riesgos:** no se pudo probar contra Brave/Windows real que una ventana
+`focused:false` posicionada fuera de pantalla se comporte como se espera
+en todas las versiones (podría recolocarse en pantalla, o el sistema
+operativo podría tratarla distinto). Prueba manual pendiente (ver reporte
+de Claude Code a Gabriel).
+
+**Estado:** IMPLEMENTADO — PENDIENTE DE VALIDACIÓN MANUAL (fase 18.1)

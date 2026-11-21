@@ -13,6 +13,24 @@
 const BASE_RGM_CONSULTA = "https://www.garantiasmobiliarias.com.co/rgm/Garantias/ConsultaGarantia.aspx";
 const REGEX_PLACA_AUTO = /^[A-Z]{3}[0-9]{3}$/;
 
+// Prompt 8b punto 1 (NEXCAM-PROMPTS-Y-PRUEBAS.md): "plan A" seria consultar
+// el RGM con un fetch() del service worker, sin tocar ninguna pestana. No
+// se implementa en esta version: la pagina de resultados de
+// ConsultaGarantia.aspx depende de un postback ASP.NET (__VIEWSTATE/
+// __EVENTVALIDATION, tabla cargada por un UpdatePanel -- ver
+// content.js:manejarAnalizarPaginaRGM, que espera la tabla con
+// MutationObserver en vez de leerla del HTML inicial) que no se puede
+// automatizar de forma confiable sin probarlo contra el portal real, y
+// CLAUDE.md prohibe que las pruebas automaticas (o este cambio sin
+// supervision) le peguen al servicio real. Mientras tanto, TODA consulta
+// usa "plan B" (pestana real) y queda anotado el motivo exacto en
+// /consulta/diagnostico -- ver MOTIVO_SIN_PLAN_A y consultaPublica().
+const MOTIVO_SIN_PLAN_A =
+  "no existe un plan A (fetch sin pestaña) implementado todavía: " +
+  "ConsultaGarantia.aspx carga la tabla de resultados con un postback " +
+  "ASP.NET (__VIEWSTATE) que no se puede automatizar sin probarlo contra " +
+  "el portal real (prohibido en pruebas automáticas, CLAUDE.md)";
+
 // Pestana Judicial actualmente abierta por este Connector (si hay una),
 // para poder cerrarla automaticamente al terminar. NO afecta ni comparte
 // nada con el flujo de RGM: RGM nunca asigna esta variable, y su pestana
@@ -625,6 +643,11 @@ function consultaPublica(consulta) {
     rgm: consulta.rgm,
     judicial: consulta.judicial,
     errores: consulta.errores,
+    // Prompt 8b punto 1: que plan se uso para RGM ("A" sin pestana, "B"
+    // con pestana/ventana invisible) y, si fue "B", por que -- consulta.html
+    // lo reenvia tal cual a /rgm/trabajador/resultado.
+    plan: consulta.plan || null,
+    planMotivo: consulta.planMotivo || null,
   };
 }
 
@@ -638,6 +661,8 @@ async function crearConsultaExterna(placaOrigen, alcance, judicialDirecto) {
     alcance: alcance || ALCANCES_CONSULTA_EXTERNA.COMPLETO,
     judicialDirecto: judicialDirecto || null,
     estado: ESTADOS_CONSULTA.RECIBIDA,
+    plan: null,
+    planMotivo: null,
     rgm: null,
     judicial: null,
     tabRgm: null,
@@ -868,9 +893,19 @@ async function procesarConsultaExterna(consulta) {
   await emitirEvento(consultaId, ESTADOS_CONSULTA.RGM_EN_PROCESO);
   registrarTraceRgmExterno("EXTERNO_CONSULTA_RGM_EN_PROCESO", `consultaId=${consultaId} placa="${consulta.placaOrigen}"`);
 
+  // Prompt 8b punto 1: sin plan A todavia (ver MOTIVO_SIN_PLAN_A), asi que
+  // toda consulta externa queda anotada como plan B desde ya -- antes de
+  // llamar a iniciarConsulta, para que quede registrado aunque la
+  // consulta termine en error.
+  consulta.plan = "B";
+  consulta.planMotivo = MOTIVO_SIN_PLAN_A;
+
   const esperaResultadoRgm = esperarProximoResultadoFinal(); // protegida
   // activarMientrasExtrae=true: causa real de la prueba real (ver nota en
   // iniciarConsulta) -- SOLO para consultas externas, el popup no cambia.
+  // Prompt 8b punto 1: ya NO activa una pestana en la ventana de NEXORA
+  // (eso era "la pestana del portal" que Gabriel veia abrirse) -- ver
+  // iniciarConsulta, que ahora abre una ventana aparte sin foco.
   await iniciarConsulta(consulta.placaOrigen, { activarMientrasExtrae: true });
 
   // Seguro: las consultas externas se procesan una a la vez, asi que
@@ -937,7 +972,10 @@ chrome.runtime.onMessageExternal.addListener((mensaje, sender, sendResponse) => 
   // si la extension de verdad respondia). Responde sincrono, sin tocar
   // ningun estado de consulta ni esperar estadoListo.
   if (mensaje && mensaje.accion === "PING") {
-    sendResponse({ ok: true });
+    // Prompt 8b punto 1: version del manifest en la respuesta, para que
+    // Consulta pueda mostrar "Connector vX.Y.Z conectado" y avisar si
+    // esta vieja (ver VERSION_CONNECTOR_ESPERADA en consulta.html).
+    sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
     return false;
   }
   if (!mensaje || mensaje.accion !== "CONSULTAR_PLACA") {
@@ -1225,14 +1263,45 @@ async function iniciarConsulta(placaCruda, opciones) {
   }
 
   // UX (autorizado): la pestana de trabajo RGM se crea INACTIVA para el
-  // popup -- NEXORA nunca pierde el foco por esto, SIN CAMBIOS. Causa real
-  // encontrada en la prueba real con una consulta EXTERNA: el portal
-  // tardaba en terminar de montar/redirigir en segundo plano y el mensaje
-  // ANALIZAR_PAGINA_RGM se perdia sin que nadie lo notara. Para una
-  // consulta externa (opciones.activarMientrasExtrae) la pestana se crea
-  // ACTIVA mientras dura la extraccion; finalizarConsultaExterna restaura
-  // la pestana que el usuario tenia activa en cuanto esta consulta termina.
-  const tab = await chrome.tabs.create({ url, active: !!opciones.activarMientrasExtrae });
+  // popup -- NEXORA nunca pierde el foco por esto, SIN CAMBIOS.
+  //
+  // Prompt 8b punto 1: para una consulta EXTERNA (opciones.activarMientrasExtrae,
+  // camara/Telegram/estudio/panel atendidas mientras Consulta esta abierta)
+  // la version anterior hacia `active: true` en la ventana ACTUAL -- eso
+  // es literalmente "la pestana del portal" que le robaba el foco a
+  // Gabriel en cada consulta automatica (reportado en la prueba de la
+  // Fase 18). La necesidad real (ver EXTERNO_PESTANA_COMPLETA/retries de
+  // ANALIZAR_PAGINA_RGM mas abajo) era que la pestana fuera la pestana
+  // ACTIVA de SU PROPIA ventana -- una pestana de fondo puede perder el
+  // mensaje si el navegador la limita.
+  //
+  // Decision (anotada, ver CLAUDE.md "decide tu"): ventana aparte PERO
+  // fuera de pantalla, NO minimizada. El encargo ofrecia las dos
+  // ("focused:false y state:'minimized' (o fuera de pantalla)"); se elige
+  // "fuera de pantalla" porque una ventana minimizada pasa sus pestanas a
+  // visibilityState:'hidden' (el navegador limita sus temporizadores,
+  // igual que una pestana de fondo real -- podria reproducir el mismo
+  // bug de mensaje perdido que `active:true` evitaba). Posicionada fuera
+  // del area visible pero SIN minimizar, la pestana sigue "visible" para
+  // el navegador (sin limitacion de temporizadores) y por fuera de la
+  // pantalla para Gabriel. Si en la prueba real la ventana aparece visible
+  // en algun monitor/sistema, Gabriel lo anota en el reporte y se cambia a
+  // `state: 'minimized'` (ver PRUEBA_MANUAL mas abajo).
+  //
+  // Se cierra sola al terminar: chrome.tabs.remove en
+  // finalizarConsultaCompleta cierra tambien la ventana, al quedar sin
+  // pestanas (comportamiento documentado de chrome.tabs.remove).
+  let tab;
+  if (opciones.activarMientrasExtrae) {
+    const ventana = await chrome.windows.create({
+      url, focused: false, type: "normal",
+      left: -32000, top: -32000, width: 1024, height: 768,
+    });
+    tab = ventana.tabs[0];
+    registrarTraceRgmExterno("EXTERNO_VENTANA_APARTE", `ventanaId=${ventana.id} tabId=${tab.id} url="${url}"`);
+  } else {
+    tab = await chrome.tabs.create({ url, active: false });
+  }
   tabRgmActual = tab.id;
 
   const listener = (tabId, changeInfo, tabInfo) => {
