@@ -741,179 +741,18 @@ function ejecutarDiagnosticoDOM(placa) {
 // nunca por cercania de titulo ni por recorrer todo el documento. Dentro de
 // cada tabla, cada valor se localiza por el TEXTO REAL de su etiqueta (la
 // celda hermana siguiente es el valor), nunca por posicion fija.
+//
+// Prompt 8c: las funciones de este bloque (IDS_TABLAS_DETALLE,
+// encontrarTablaPorIdReal, buscarValorPorEtiqueta, normalizarEspacios,
+// obtenerTextoUnicaCeldaDeDatos, extraerCampoEntreEtiquetas,
+// extraerDeudorGaranteReal, extraerAcreedorReal,
+// extraerTipoServicioDeDescripcion, extraerVehiculoReal) se MUDARON TAL
+// CUAL (cero cambios de logica) a extractor_detalle_rgm.js, para poder
+// usarlas tambien desde offscreen.js (plan A, sin pestana) sin duplicar
+// codigo. manifest.json carga ese archivo ANTES que este, en el mismo
+// content script: las funciones siguen disponibles aqui con el mismo
+// nombre, sin ningun otro cambio.
 // =========================================================================
-
-const IDS_TABLAS_DETALLE = {
-  deudores: "ContentPlaceHolderSeguridad_ContentPlaceHolderContenido_ConsultaGM1_gvDeudores",
-  acreedores: "ContentPlaceHolderSeguridad_ContentPlaceHolderContenido_ConsultaGM1_gvAcreedores",
-  bienes: "ContentPlaceHolderSeguridad_ContentPlaceHolderContenido_ConsultaGM1_gvBienesSerial",
-};
-
-/**
- * Busca la tabla por su ID EXACTO confirmado en el DOM real. Como
- * respaldo (documentado, no una suposicion nueva: mismo control, distinto
- * prefijo de ContentPlaceHolder si algun dia cambia el master page),
- * intenta por el sufijo propio del control (gvDeudores, etc.), que es la
- * parte estable y con significado real.
- */
-function encontrarTablaPorIdReal(idExacto) {
-  const exacta = document.getElementById(idExacto);
-  if (exacta) return exacta;
-  const sufijo = idExacto.split("_").pop();
-  return document.querySelector(`[id$="_${sufijo}"], [id="${sufijo}"]`);
-}
-
-/**
- * Dentro de un contenedor (una tabla especifica, incluyendo lo que haya en
- * tablas anidadas dentro de ella, ya que querySelectorAll recorre todos
- * los descendientes), busca la celda cuyo texto sea exactamente la
- * etiqueta buscada (con o sin ":" final) y devuelve el texto de la celda
- * INMEDIATAMENTE siguiente en la misma fila (el valor asociado real, no
- * una posicion fija global).
- */
-function buscarValorPorEtiqueta(contenedor, etiquetaBuscada) {
-  if (!contenedor) return null;
-  const normalizado = normalizarTexto(etiquetaBuscada).replace(/:$/, "");
-  const celdas = Array.from(contenedor.querySelectorAll("td, th"));
-
-  for (const celda of celdas) {
-    const textoCelda = normalizarTexto(celda.textContent).replace(/:$/, "");
-    if (textoCelda === normalizado) {
-      const siguienteCelda = celda.nextElementSibling;
-      return siguienteCelda ? limpiarTexto(siguienteCelda.textContent) || null : null;
-    }
-  }
-  return null;
-}
-
-/**
- * CORRECCION DEFINITIVA - Deudores/Garantes, basada en el DOM real
- * confirmado por el diagnostico (gvDeudores: 2 filas, sin thead, sin
- * tablas anidadas; fila 1 = <th>Deudor o garante</th>, fila 2 = un UNICO
- * <td> con todas las etiquetas y valores como texto consecutivo). No usa
- * celda hermana ni columnas de grilla: esas hipotesis no aplican a esta
- * estructura real.
- */
-function normalizarEspacios(s) {
-  return (s || "").replace(/\s+/g, " ").trim();
-}
-
-/**
- * Dentro de la tabla dada, localiza la fila que tiene un <td> (nunca la de
- * solo <th>) y devuelve el texto de esa unica celda, con espacios
- * normalizados. Localizacion por estructura, no por posicion fija: si la
- * tabla tuviera mas filas, seguiria encontrando la que realmente trae los
- * datos.
- */
-function obtenerTextoUnicaCeldaDeDatos(tabla) {
-  const filaConDatos = Array.from(tabla.querySelectorAll("tr")).find((fila) => fila.querySelector("td"));
-  const celda = filaConDatos ? filaConDatos.querySelector("td") : null;
-  return celda ? normalizarEspacios(celda.textContent) : null;
-}
-
-/**
- * Extrae el texto entre dos etiquetas literales dentro de un texto ya
- * normalizado en espacios, usando limites por indexOf (sin regex, sin
- * busqueda global del documento).
- */
-function extraerCampoEntreEtiquetas(texto, etiquetaInicio, etiquetaFin) {
-  const idxInicio = texto.indexOf(etiquetaInicio);
-  if (idxInicio === -1) return null;
-  const desde = idxInicio + etiquetaInicio.length;
-  const idxFin = etiquetaFin ? texto.indexOf(etiquetaFin, desde) : -1;
-  const hasta = idxFin === -1 ? texto.length : idxFin;
-  const valor = texto.slice(desde, hasta).trim();
-  return valor || null;
-}
-
-function extraerDeudorGaranteReal() {
-  const tabla = encontrarTablaPorIdReal(IDS_TABLAS_DETALLE.deudores);
-  if (!tabla) return { encontrada: false, valor: null };
-
-  const texto = obtenerTextoUnicaCeldaDeDatos(tabla);
-  if (!texto) {
-    return {
-      encontrada: true,
-      valor: { nombre: null, tipo_identificacion: null, numero_identificacion: null, ciudad: null },
-    };
-  }
-
-  return {
-    encontrada: true,
-    valor: {
-      nombre: extraerCampoEntreEtiquetas(texto, "Razón Social o Nombre", "Tipo Identificación"),
-      tipo_identificacion: extraerCampoEntreEtiquetas(texto, "Tipo Identificación", "Número de Identificación"),
-      numero_identificacion: extraerCampoEntreEtiquetas(
-        texto,
-        "Número de Identificación",
-        "Dígito De Verificación"
-      ),
-      ciudad: extraerCampoEntreEtiquetas(texto, "Ciudad", "Dirección"),
-    },
-  };
-}
-
-function extraerAcreedorReal() {
-  const tabla = encontrarTablaPorIdReal(IDS_TABLAS_DETALLE.acreedores);
-  if (!tabla) return { encontrada: false, valor: null };
-
-  return {
-    encontrada: true,
-    valor: {
-      razon_social: buscarValorPorEtiqueta(tabla, "Razón Social o Nombre"),
-    },
-  };
-}
-
-/**
- * Extrae "T. Servicio: X" desde el texto de descripcion del bien, SOLO
- * como fallback cuando el campo directo "Tipo de Servicio" viene vacio
- * (regla explicita de la especificacion). Corta la captura justo antes de
- * la siguiente etiqueta tipo "Palabra:" (p. ej. "Linea:") o al final del
- * texto. No inventa nada: si no encuentra el patron, devuelve null.
- *
- * Caso real verificado:
- *   "...Serie: 9BGEP76C0MB201888T. Servicio: ParticularLinea: TRACKER"
- *   -> "Particular"
- */
-function extraerTipoServicioDeDescripcion(descripcion) {
-  if (!descripcion) return null;
-  const match = descripcion.match(/T\.\s*Servicio:\s*([^:]*?)(?=[A-ZÁÉÍÓÚÑ][a-záéíóúñ.]*:|$)/);
-  if (match && match[1] && match[1].trim()) return limpiarTexto(match[1]);
-  return null;
-}
-
-function extraerVehiculoReal() {
-  const tabla = encontrarTablaPorIdReal(IDS_TABLAS_DETALLE.bienes);
-  if (!tabla) return { encontrada: false, valor: null };
-
-  const descripcionBien = buscarValorPorEtiqueta(tabla, "Descripción del Bien");
-  let tipoServicio = buscarValorPorEtiqueta(tabla, "Tipo de Servicio");
-  let tipoServicioOrigen = tipoServicio ? "campo_directo" : null;
-
-  if (!tipoServicio) {
-    const desdeDescripcion = extraerTipoServicioDeDescripcion(descripcionBien);
-    if (desdeDescripcion) {
-      tipoServicio = desdeDescripcion;
-      tipoServicioOrigen = "fallback_descripcion_bien";
-    }
-  }
-
-  return {
-    encontrada: true,
-    tipoServicioOrigen,
-    valor: {
-      tipo_bien: buscarValorPorEtiqueta(tabla, "Tipo de Bien"),
-      marca: buscarValorPorEtiqueta(tabla, "Marca"),
-      fabricante: buscarValorPorEtiqueta(tabla, "Fabricante"),
-      modelo: buscarValorPorEtiqueta(tabla, "Año Correspondiente al Modelo"),
-      placa: buscarValorPorEtiqueta(tabla, "Placa"),
-      numero_serial: buscarValorPorEtiqueta(tabla, "Número de Serial"),
-      tipo_servicio: tipoServicio || null,
-      descripcion_bien: descripcionBien,
-    },
-  };
-}
 
 function extraerDatosDetalleReal(placaConsultada) {
   registrarTraceRgm("RGM_EXTRACCION_INICIADA", `placa="${placaConsultada}"`);
@@ -922,67 +761,17 @@ function extraerDatosDetalleReal(placaConsultada) {
     "Extrayendo datos reales por ID de tabla (gvDeudores / gvAcreedores / gvBienesSerial)..."
   );
 
-  // Las 3 llamadas siguientes son a los extractores PROTEGIDOS, sin
-  // modificar: solo se registra el evento ANTES/DESPUES de invocarlos,
-  // nunca dentro de ellos.
-  const deudor = extraerDeudorGaranteReal();
-  const acreedor = extraerAcreedorReal();
-  const vehiculo = extraerVehiculoReal();
+  // calcularDatosDetalleReal (extractor_detalle_rgm.js) hace EXACTAMENTE lo
+  // que antes hacia este mismo bloque de codigo, solo que ahora vive en el
+  // archivo compartido con offscreen.js; aqui solo queda el logging/
+  // mensajeria propios de ser un content script real.
+  const { resultado, camposFaltantes, tipoServicioOrigen } = calcularDatosDetalleReal(placaConsultada);
 
-  const camposFaltantes = [];
-
-  if (!deudor.encontrada) {
-    camposFaltantes.push("deudor_garante (tabla no encontrada)");
-  } else {
-    if (!deudor.valor.nombre) camposFaltantes.push("deudor_garante.nombre");
-    if (!deudor.valor.tipo_identificacion) camposFaltantes.push("deudor_garante.tipo_identificacion");
-    if (!deudor.valor.numero_identificacion) camposFaltantes.push("deudor_garante.numero_identificacion");
-    if (!deudor.valor.ciudad) camposFaltantes.push("deudor_garante.ciudad");
-  }
-
-  if (!acreedor.encontrada || !acreedor.valor.razon_social) {
-    camposFaltantes.push("acreedor.razon_social");
-  }
-
-  if (!vehiculo.encontrada) {
-    camposFaltantes.push("vehiculo (tabla no encontrada)");
-  } else {
-    if (!vehiculo.valor.tipo_bien) camposFaltantes.push("vehiculo.tipo_bien");
-    if (!vehiculo.valor.marca) camposFaltantes.push("vehiculo.marca");
-    if (!vehiculo.valor.fabricante) camposFaltantes.push("vehiculo.fabricante");
-    if (!vehiculo.valor.modelo) camposFaltantes.push("vehiculo.modelo");
-    if (!vehiculo.valor.placa) camposFaltantes.push("vehiculo.placa");
-    if (!vehiculo.valor.numero_serial) camposFaltantes.push("vehiculo.numero_serial");
-    if (!vehiculo.valor.descripcion_bien) camposFaltantes.push("vehiculo.descripcion_bien");
-  }
-
-  // Comparacion normalizada SOLO para mayusculas/espacios; el valor
-  // almacenado en el JSON conserva el texto tal cual se extrajo (regla 16).
-  const placaExtraidaCruda = vehiculo.valor ? vehiculo.valor.placa : null;
-  const placaCoincide =
-    !!placaExtraidaCruda && limpiarTexto(placaExtraidaCruda).toUpperCase() === limpiarTexto(placaConsultada).toUpperCase();
-
-  if (placaExtraidaCruda && !placaCoincide) {
-    camposFaltantes.push(`placa_coincide (consultada="${placaConsultada}", extraida="${placaExtraidaCruda}")`);
-  }
-
-  const estado = camposFaltantes.length === 0 && placaCoincide ? "OK" : "EXTRACCION_INCOMPLETA";
-
-  NEXORA_LOG(`EXTRACCION_REAL estado=${estado}`);
-  if (vehiculo.tipoServicioOrigen) NEXORA_LOG(`tipo_servicio obtenido via: ${vehiculo.tipoServicioOrigen}`);
+  NEXORA_LOG(`EXTRACCION_REAL estado=${resultado.estado}`);
+  if (tipoServicioOrigen) NEXORA_LOG(`tipo_servicio obtenido via: ${tipoServicioOrigen}`);
   if (camposFaltantes.length > 0) NEXORA_LOG(`Campos/validaciones faltantes: ${JSON.stringify(camposFaltantes)}`);
 
-  const resultado = {
-    fuente: "RGM",
-    placa_consultada: placaConsultada,
-    estado,
-    deudor_garante: deudor.valor,
-    acreedor: acreedor.valor,
-    vehiculo: vehiculo.valor,
-  };
-  if (camposFaltantes.length > 0) resultado.campos_faltantes = camposFaltantes;
-
-  if (estado === "OK") {
+  if (resultado.estado === "OK") {
     enviarEstado("EXTRACCION_COMPLETADA", "Los tres bloques se extrajeron correctamente y la placa coincide.");
     registrarTraceRgm("RGM_EXTRACCION_COMPLETADA", `placa="${placaConsultada}"`);
   } else {
@@ -990,7 +779,7 @@ function extraerDatosDetalleReal(placaConsultada) {
     registrarTraceRgm("RGM_EXTRACCION_INCOMPLETA", camposFaltantes.join(", "));
   }
   enviarResultadoFinal(resultado);
-  registrarTraceRgm("RGM_FINALIZACION", `estado_final=${estado}`);
+  registrarTraceRgm("RGM_FINALIZACION", `estado_final=${resultado.estado}`);
 }
 
 // =========================================================================

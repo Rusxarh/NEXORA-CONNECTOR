@@ -1,0 +1,17 @@
+<!doctype html>
+<!--
+  offscreen.html
+  Prompt 8c: documento offscreen (MV3) usado SOLO para tener un `document`
+  real donde cargar el HTML de la pagina de detalle del RGM (obtenido con
+  fetch() desde background.js) y leerlo con extractor_detalle_rgm.js --
+  el service worker no tiene DOM. Nunca se muestra, nunca navega a ningun
+  sitio externo: el HTML llega por mensaje y se inyecta aqui mismo.
+-->
+<html>
+  <head><meta charset="utf-8"></head>
+  <body>
+    <div id="contenedorDetalleRgm"></div>
+    <script src="extractor_detalle_rgm.js"></script>
+    <script src="offscreen.js"></script>
+  </body>
+</html>

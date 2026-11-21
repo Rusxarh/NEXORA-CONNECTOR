@@ -8,28 +8,48 @@
  * placa normalizada y validada aqui mismo.
  *
  * Prototipo aislado: no hay conexion con NEXORA API todavia.
+ *
+ * Prompt 8c: importScripts (service worker clasico, sin "type":"module" en
+ * el manifest) para las partes puras y testeables por separado:
+ * ventana_bounds.js (punto 0, validar bounds de chrome.windows.create) y
+ * rgm_plan_a.js (punto 1, consultar el RGM con fetch(), sin pestana).
  */
+importScripts("ventana_bounds.js", "rgm_plan_a.js");
 
 const BASE_RGM_CONSULTA = "https://www.garantiasmobiliarias.com.co/rgm/Garantias/ConsultaGarantia.aspx";
 const REGEX_PLACA_AUTO = /^[A-Z]{3}[0-9]{3}$/;
 
-// Prompt 8b punto 1 (NEXCAM-PROMPTS-Y-PRUEBAS.md): "plan A" seria consultar
-// el RGM con un fetch() del service worker, sin tocar ninguna pestana. No
-// se implementa en esta version: la pagina de resultados de
-// ConsultaGarantia.aspx depende de un postback ASP.NET (__VIEWSTATE/
-// __EVENTVALIDATION, tabla cargada por un UpdatePanel -- ver
-// content.js:manejarAnalizarPaginaRGM, que espera la tabla con
-// MutationObserver en vez de leerla del HTML inicial) que no se puede
-// automatizar de forma confiable sin probarlo contra el portal real, y
-// CLAUDE.md prohibe que las pruebas automaticas (o este cambio sin
-// supervision) le peguen al servicio real. Mientras tanto, TODA consulta
-// usa "plan B" (pestana real) y queda anotado el motivo exacto en
-// /consulta/diagnostico -- ver MOTIVO_SIN_PLAN_A y consultaPublica().
-const MOTIVO_SIN_PLAN_A =
-  "no existe un plan A (fetch sin pestaña) implementado todavía: " +
-  "ConsultaGarantia.aspx carga la tabla de resultados con un postback " +
-  "ASP.NET (__VIEWSTATE) que no se puede automatizar sin probarlo contra " +
-  "el portal real (prohibido en pruebas automáticas, CLAUDE.md)";
+// Prompt 8c: plan A (rgm_plan_a.js, consultarRgmPlanA) ya existe de verdad,
+// construido a partir de la captura real de Gabriel (RGM-PLAN-A.md), sin
+// datos reales. Motivos de caida a plan B ya NO son un solo texto fijo:
+// cada paso de consultarRgmPlanA devuelve su propio "motivo" (captcha,
+// __VIEWSTATE ausente, delta sin la grilla, HTTP distinto de 200, etc.),
+// que queda anotado tal cual en /consulta/diagnostico -- ver
+// procesarConsultaExterna y consultaPublica().
+
+// El service worker no tiene DOM/DOMParser (RGM-PLAN-A.md, "Cual fila
+// elegir" / paso 4): consultarRgmPlanA delega la lectura del HTML de
+// detalle a esta funcion, que usa un offscreen document (si/MV3) con
+// extractor_detalle_rgm.js -- el MISMO extractor que content.js, sin
+// duplicar logica (ver offscreen.html/offscreen.js).
+async function asegurarOffscreenDetalleRgm() {
+  try {
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["DOM_PARSER"],
+      justification: "Leer el HTML de detalle del RGM obtenido con fetch() (el service worker no tiene DOM).",
+    });
+  } catch (e) {
+    // Ya existe un offscreen document (mensaje tipico de Chrome: "Only a
+    // single offscreen document may be created"): no es un error real.
+    if (!String(e && e.message).includes("single offscreen document")) throw e;
+  }
+}
+
+async function extraerDetalleRgmConOffscreen(htmlDetalle, placa) {
+  await asegurarOffscreenDetalleRgm();
+  return await chrome.runtime.sendMessage({ accion: "EXTRAER_DETALLE_RGM_OFFSCREEN", html: htmlDetalle, placa });
+}
 
 // Pestana Judicial actualmente abierta por este Connector (si hay una),
 // para poder cerrarla automaticamente al terminar. NO afecta ni comparte
@@ -881,6 +901,17 @@ async function continuarConsultaExternaTrasRgm(consulta, resultadoRgm) {
 // /consulta vía consulta.errores).
 const TIMEOUT_CONSULTA_EXTERNA_RGM_MS = 2 * 60 * 1000;
 
+// Prompt 8c: "una consulta a la vez, minimo 3s entre consultas" para el
+// plan A (RGM-PLAN-A.md, "Sesion y proteccion") -- procesarColaExternaSiLibre
+// ya procesa una consulta a la vez (await secuencial), esto solo agrega el
+// respiro minimo entre el fin de un fetch real y el inicio del siguiente.
+let ultimaConsultaPlanATerminadaEn = 0;
+
+async function esperarRespiroEntreConsultasPlanA() {
+  const faltan = RGM_PLAN_A_MIN_MS_ENTRE_CONSULTAS - (Date.now() - ultimaConsultaPlanATerminadaEn);
+  if (faltan > 0) await new Promise((r) => setTimeout(r, faltan));
+}
+
 async function procesarConsultaExterna(consulta) {
   const consultaId = consulta.consultaId;
 
@@ -893,19 +924,38 @@ async function procesarConsultaExterna(consulta) {
   await emitirEvento(consultaId, ESTADOS_CONSULTA.RGM_EN_PROCESO);
   registrarTraceRgmExterno("EXTERNO_CONSULTA_RGM_EN_PROCESO", `consultaId=${consultaId} placa="${consulta.placaOrigen}"`);
 
-  // Prompt 8b punto 1: sin plan A todavia (ver MOTIVO_SIN_PLAN_A), asi que
-  // toda consulta externa queda anotada como plan B desde ya -- antes de
-  // llamar a iniciarConsulta, para que quede registrado aunque la
-  // consulta termine en error.
+  // Prompt 8c punto 1: plan A primero, SIEMPRE (fetch, sin pestana ni
+  // ventana). Solo si falla por un motivo estructural (sin __VIEWSTATE,
+  // captcha/desafio, delta sin la grilla esperada, HTTP distinto de 200,
+  // el extractor del detalle no pudo leer nada) se cae a plan B (punto 2).
+  await esperarRespiroEntreConsultasPlanA();
+  registrarTraceRgmExterno("EXTERNO_PLAN_A_INICIO", `consultaId=${consultaId} placa="${consulta.placaOrigen}"`);
+  let resultadoPlanA;
+  try {
+    resultadoPlanA = await consultarRgmPlanA(consulta.placaOrigen);
+  } catch (e) {
+    resultadoPlanA = { ok: false, motivo: `excepcion inesperada: ${e && e.message ? e.message : e}` };
+  }
+  ultimaConsultaPlanATerminadaEn = Date.now();
+
+  if (resultadoPlanA.ok) {
+    consulta.plan = "A";
+    consulta.planMotivo = null;
+    registrarTraceRgmExterno("EXTERNO_PLAN_A_OK", `consultaId=${consultaId} estado=${resultadoPlanA.resultado.estado}`);
+    await continuarConsultaExternaTrasRgm(consulta, resultadoPlanA.resultado);
+    return;
+  }
+
   consulta.plan = "B";
-  consulta.planMotivo = MOTIVO_SIN_PLAN_A;
+  consulta.planMotivo = resultadoPlanA.motivo || "motivo no informado";
+  registrarTraceRgmExterno(
+    "EXTERNO_PLAN_A_FALLO_VA_A_PLAN_B",
+    `consultaId=${consultaId} motivo="${resultadoPlanA.motivo}" httpStatus=${resultadoPlanA.httpStatus || "-"}`
+  );
 
   const esperaResultadoRgm = esperarProximoResultadoFinal(); // protegida
   // activarMientrasExtrae=true: causa real de la prueba real (ver nota en
   // iniciarConsulta) -- SOLO para consultas externas, el popup no cambia.
-  // Prompt 8b punto 1: ya NO activa una pestana en la ventana de NEXORA
-  // (eso era "la pestana del portal" que Gabriel veia abrirse) -- ver
-  // iniciarConsulta, que ahora abre una ventana aparte sin foco.
   await iniciarConsulta(consulta.placaOrigen, { activarMientrasExtrae: true });
 
   // Seguro: las consultas externas se procesan una a la vez, asi que
@@ -946,6 +996,16 @@ async function procesarConsultaExterna(consulta) {
 // referencia, pero el buscador real de Consulta Judicial solo busca por
 // nombre/razon social -- no se modifico judicial.js para aceptar un
 // numero de documento, no existe ese campo en el formulario real.
+//
+// Prompt 8c (confirmado con NEXORA-CONTROL): desde el Prompt 8, Judicial
+// YA NO depende de este camino -- lo atiende un hilo propio de
+// NEXORA-CONTROL contra la API real (judicial_directo.py), que reserva
+// los items alcance="JUDICIAL" casi al instante (reservar_siguiente_item_rgm_judicial).
+// Esta funcion y judicial.js (con su bug conocido de extraerSujetosProcesales
+// con roles en minuscula/con "/", Prompt 8 punto 2 -- NUNCA corregido, ya
+// no vale la pena) quedan como "plan B" documentado para el caso raro de
+// que ese hilo este caido; no se borran, pero en la practica no deberian
+// dispararse nunca.
 async function procesarConsultaExternaJudicialDirecta(consulta) {
   const consultaId = consulta.consultaId;
   const nombre = (consulta.judicialDirecto && consulta.judicialDirecto.nombre) || "";
@@ -1206,7 +1266,7 @@ async function publicarEstado(estado, detalle) {
 const INTENTOS_ENVIO_ANALIZAR_RGM = 4;
 const ESPERA_ENTRE_INTENTOS_ANALIZAR_RGM_MS = 700;
 
-function enviarAnalizarPaginaRgmConReintentos(tabId, placa, intento) {
+function enviarAnalizarPaginaRgmConReintentos(tabId, placa, intento, alConfirmar) {
   intento = intento || 1;
   chrome.tabs.sendMessage(tabId, { tipo: "ANALIZAR_PAGINA_RGM", placa }, (respuesta) => {
     const error = chrome.runtime.lastError;
@@ -1217,7 +1277,7 @@ function enviarAnalizarPaginaRgmConReintentos(tabId, placa, intento) {
       );
       if (intento < INTENTOS_ENVIO_ANALIZAR_RGM) {
         setTimeout(
-          () => enviarAnalizarPaginaRgmConReintentos(tabId, placa, intento + 1),
+          () => enviarAnalizarPaginaRgmConReintentos(tabId, placa, intento + 1, alConfirmar),
           ESPERA_ENTRE_INTENTOS_ANALIZAR_RGM_MS
         );
       } else {
@@ -1232,6 +1292,11 @@ function enviarAnalizarPaginaRgmConReintentos(tabId, placa, intento) {
       "EXTERNO_ENVIO_CONFIRMADO",
       `intento=${intento} tabId=${tabId} placa="${placa}" respuesta=${JSON.stringify(respuesta || null)}`
     );
+    // Prompt 8c punto 0: hook opcional (sin cambiar el comportamiento de
+    // ningun llamador existente, que no lo pasa) -- iniciarConsulta lo usa
+    // para saber si la ventana minimizada SI logro entregar el mensaje,
+    // antes de decidir si escala a la ventana en la esquina.
+    if (typeof alConfirmar === "function") alConfirmar();
   });
 }
 
@@ -1265,45 +1330,90 @@ async function iniciarConsulta(placaCruda, opciones) {
   // UX (autorizado): la pestana de trabajo RGM se crea INACTIVA para el
   // popup -- NEXORA nunca pierde el foco por esto, SIN CAMBIOS.
   //
-  // Prompt 8b punto 1: para una consulta EXTERNA (opciones.activarMientrasExtrae,
-  // camara/Telegram/estudio/panel atendidas mientras Consulta esta abierta)
-  // la version anterior hacia `active: true` en la ventana ACTUAL -- eso
-  // es literalmente "la pestana del portal" que le robaba el foco a
-  // Gabriel en cada consulta automatica (reportado en la prueba de la
-  // Fase 18). La necesidad real (ver EXTERNO_PESTANA_COMPLETA/retries de
-  // ANALIZAR_PAGINA_RGM mas abajo) era que la pestana fuera la pestana
-  // ACTIVA de SU PROPIA ventana -- una pestana de fondo puede perder el
-  // mensaje si el navegador la limita.
+  // Prompt 8b/8c: para una consulta EXTERNA (opciones.activarMientrasExtrae,
+  // camara/Telegram/estudio/panel atendidas mientras Consulta esta abierta;
+  // solo se llega aqui si el plan A -- rgm_plan_a.js -- ya fallo) la pestana
+  // se abre en una ventana APARTE, sin foco, para que nunca le robe el
+  // foco a la ventana de NEXORA (bug real de la prueba de la Fase 18).
   //
-  // Decision (anotada, ver CLAUDE.md "decide tu"): ventana aparte PERO
-  // fuera de pantalla, NO minimizada. El encargo ofrecia las dos
-  // ("focused:false y state:'minimized' (o fuera de pantalla)"); se elige
-  // "fuera de pantalla" porque una ventana minimizada pasa sus pestanas a
-  // visibilityState:'hidden' (el navegador limita sus temporizadores,
-  // igual que una pestana de fondo real -- podria reproducir el mismo
-  // bug de mensaje perdido que `active:true` evitaba). Posicionada fuera
-  // del area visible pero SIN minimizar, la pestana sigue "visible" para
-  // el navegador (sin limitacion de temporizadores) y por fuera de la
-  // pantalla para Gabriel. Si en la prueba real la ventana aparece visible
-  // en algun monitor/sistema, Gabriel lo anota en el reporte y se cambia a
-  // `state: 'minimized'` (ver PRUEBA_MANUAL mas abajo).
-  //
+  // Prompt 8c punto 0 (URGENTE, prueba del 21/11/2026): la version anterior
+  // (8b) posicionaba esa ventana fuera de pantalla (left/top: -32000) --
+  // chrome.windows.create la RECHAZA ("Invalid value for bounds. Bounds
+  // must be at least 50% within visible screen space."), asi que NINGUNA
+  // consulta por plan B terminaba. Nunca mas bounds fuera de pantalla:
+  //   1. Intento 1: ventana minimizada (state:"minimized", sin bounds
+  //      explicitos -- minimizar nunca choca con la regla del 50%).
+  //   2. Si en 20s no se confirma que el mensaje ANALIZAR_PAGINA_RGM llego
+  //      (ver enviarAnalizarPaginaRgmConReintentos/alConfirmar -- podria
+  //      ser que, minimizada, el navegador limite demasiado sus
+  //      temporizadores), se cierra esa ventana y se reintenta con una
+  //      ventana normal pequena EN UNA ESQUINA, 100% DENTRO de la pantalla
+  //      (chrome.system.display + construirBoundsEnEsquina, ventana_bounds.js).
+  //   3. Si aun asi el sistema le pasa el foco a esa ventana, se devuelve
+  //      el foco a la ventana que lo tenia antes.
   // Se cierra sola al terminar: chrome.tabs.remove en
   // finalizarConsultaCompleta cierra tambien la ventana, al quedar sin
   // pestanas (comportamiento documentado de chrome.tabs.remove).
   let tab;
   if (opciones.activarMientrasExtrae) {
-    const ventana = await chrome.windows.create({
-      url, focused: false, type: "normal",
-      left: -32000, top: -32000, width: 1024, height: 768,
-    });
-    tab = ventana.tabs[0];
-    registrarTraceRgmExterno("EXTERNO_VENTANA_APARTE", `ventanaId=${ventana.id} tabId=${tab.id} url="${url}"`);
-  } else {
-    tab = await chrome.tabs.create({ url, active: false });
-  }
-  tabRgmActual = tab.id;
+    const ventanaConFocoAntes = await chrome.windows.getLastFocused().catch(() => null);
 
+    let ventana;
+    try {
+      ventana = await chrome.windows.create({ url, focused: false, state: "minimized", type: "normal" });
+      registrarTraceRgmExterno("EXTERNO_VENTANA_APARTE", `modo=minimizada ventanaId=${ventana.id} tabId=${ventana.tabs[0].id} url="${url}"`);
+    } catch (e) {
+      registrarTraceRgmExterno("EXTERNO_VENTANA_MINIMIZADA_FALLO", String(e && e.message ? e.message : e));
+      ventana = await crearVentanaRgmEnEsquina(url);
+      registrarTraceRgmExterno("EXTERNO_VENTANA_APARTE", `modo=esquina(directo) ventanaId=${ventana.id} tabId=${ventana.tabs[0].id} url="${url}"`);
+    }
+    tab = ventana.tabs[0];
+    tabRgmActual = tab.id;
+
+    const ackConfirmado = await esperarAckConTimeout(tab, placa, opciones, TIMEOUT_VENTANA_MINIMIZADA_MS);
+    if (!ackConfirmado) {
+      registrarTraceRgmExterno(
+        "EXTERNO_VENTANA_MINIMIZADA_SIN_ACK",
+        `tabId=${tab.id} placa="${placa}" tras ${TIMEOUT_VENTANA_MINIMIZADA_MS}ms, escalando a ventana en la esquina`
+      );
+      try { await chrome.windows.remove(ventana.id); } catch (e) { /* ya no existia */ }
+
+      const ventanaEsquina = await crearVentanaRgmEnEsquina(url);
+      tab = ventanaEsquina.tabs[0];
+      tabRgmActual = tab.id;
+      registrarTraceRgmExterno("EXTERNO_VENTANA_APARTE", `modo=esquina ventanaId=${ventanaEsquina.id} tabId=${tab.id} url="${url}"`);
+
+      if (ventanaConFocoAntes) {
+        try {
+          const estadoVentanaEsquina = await chrome.windows.get(ventanaEsquina.id);
+          if (estadoVentanaEsquina.focused) await chrome.windows.update(ventanaConFocoAntes.id, { focused: true });
+        } catch (e) { /* alguna de las dos ventanas ya no existe */ }
+      }
+      registrarListenerYEnviarAnalizar(tab, placa, opciones, null);
+    }
+    // Si ackConfirmado es true, esperarAckConTimeout ya disparo el envio
+    // del mensaje (y su confirmacion) sobre la ventana minimizada: nada
+    // mas que hacer aqui.
+    return;
+  }
+
+  tab = await chrome.tabs.create({ url, active: false });
+  tabRgmActual = tab.id;
+  registrarListenerYEnviarAnalizar(tab, placa, opciones, null);
+}
+
+// Prompt 8c punto 0: minimizada da 20s para confirmar que el mensaje
+// ANALIZAR_PAGINA_RGM de verdad llego (ver enviarAnalizarPaginaRgmConReintentos)
+// antes de escalar a la ventana en la esquina.
+const TIMEOUT_VENTANA_MINIMIZADA_MS = 20000;
+
+/**
+ * Espera a que la pestana `tab` termine de cargar, manda ANALIZAR_PAGINA_RGM
+ * (con reintentos) y llama a `alAck` en cuanto se confirma la entrega (nunca
+ * cuando el extractor termina: eso llega por otro camino, RESULTADO_FINAL).
+ * `alAck` puede ser null (camino normal del popup, sin nada que esperar).
+ */
+function registrarListenerYEnviarAnalizar(tab, placa, opciones, alAck) {
   const listener = (tabId, changeInfo, tabInfo) => {
     if (tabId === tab.id && changeInfo.status === "complete") {
       chrome.tabs.onUpdated.removeListener(listener);
@@ -1314,7 +1424,7 @@ async function iniciarConsulta(placaCruda, opciones) {
       // via JS/AJAX tras el evento "complete".
       setTimeout(() => {
         if (opciones.activarMientrasExtrae) {
-          enviarAnalizarPaginaRgmConReintentos(tab.id, placa, 1);
+          enviarAnalizarPaginaRgmConReintentos(tab.id, placa, 1, alAck);
         } else {
           chrome.tabs.sendMessage(tab.id, { tipo: "ANALIZAR_PAGINA_RGM", placa });
         }
@@ -1322,6 +1432,42 @@ async function iniciarConsulta(placaCruda, opciones) {
     }
   };
   chrome.tabs.onUpdated.addListener(listener);
+}
+
+/** true si se confirmo el ack antes de msEspera; false si se agoto el tiempo. */
+function esperarAckConTimeout(tab, placa, opciones, msEspera) {
+  return new Promise((resolve) => {
+    let resuelto = false;
+    registrarListenerYEnviarAnalizar(tab, placa, opciones, () => {
+      if (resuelto) return;
+      resuelto = true;
+      resolve(true);
+    });
+    setTimeout(() => {
+      if (resuelto) return;
+      resuelto = true;
+      resolve(false);
+    }, msEspera);
+  });
+}
+
+/** Pantalla principal (workArea) real, o PANTALLA_DE_RESPALDO si no se puede leer. */
+async function obtenerPantallaPrincipal() {
+  try {
+    const pantallas = await chrome.system.display.getInfo();
+    const principal = pantallas.find((p) => p.isPrimary) || pantallas[0];
+    if (principal && principal.workArea) return principal.workArea;
+  } catch (e) {
+    registrarTraceRgmExterno("EXTERNO_PANTALLA_NO_DISPONIBLE", String(e && e.message ? e.message : e));
+  }
+  return PANTALLA_DE_RESPALDO;
+}
+
+/** Ventana normal pequena, 100% dentro de la pantalla principal, sin foco. */
+async function crearVentanaRgmEnEsquina(url) {
+  const pantalla = await obtenerPantallaPrincipal();
+  const bounds = construirBoundsEnEsquina(pantalla);
+  return chrome.windows.create({ url, focused: false, type: "normal", ...bounds });
 }
 
 // =========================================================================
