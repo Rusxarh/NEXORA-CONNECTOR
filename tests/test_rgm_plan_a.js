@@ -19,6 +19,7 @@ const {
   rgmPlanAConstruirCuerpoBusqueda,
   rgmPlanAConstruirCuerpoDetalle,
   rgmPlanAPareceDesafioOCaptcha,
+  rgmPlanAFormularioValido,
   consultarRgmPlanA,
 } = require("../rgm_plan_a.js");
 
@@ -52,6 +53,10 @@ function segmentoDelta(tipo, id, contenido) {
   return `${contenido.length}|${tipo}|${id}|${contenido}|`;
 }
 
+// Prompt 8d punto 1: el formulario REAL trae un campo "recaptchaResponse"
+// vacio y suele mencionar la palabra "captcha" en algun script, sin que eso
+// signifique que haya un desafio de verdad. Este fixture lo incluye a
+// proposito para probar que ya no causa una falsa alarma.
 const HTML_FORMULARIO = `
 <html><body><form>
 <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="VS_FICTICIO_ABC123" />
@@ -62,10 +67,15 @@ const HTML_FORMULARIO = `
 <input type="hidden" name="__SCROLLPOSITIONY" id="__SCROLLPOSITIONY" value="0" />
 <input type="hidden" name="ctl00$ctl00$hdnCSFK" id="hdnCSFK" value="CSFK_FICTICIO_0000000000000000000000000000000000000000000000000000000000000000" />
 <input type="hidden" name="ContentPlaceHolderSeguridad_ToolkitScriptManager1_HiddenField" id="TSM" value=";;AjaxControlToolkit, Version=3.5.7.123, FICTICIO" />
+<input type="text" name="ctl00$ctl00$ContentPlaceHolderSeguridad$ContentPlaceHolderContenido$txtNumBien" id="txtNumBien" value="" />
+<input type="hidden" name="ctl00$ctl00$ContentPlaceHolderSeguridad$ContentPlaceHolderContenido$recaptchaResponse" id="recaptchaResponse" value="" />
+<script>// carga del widget de captcha, siempre presente aunque no se use</script>
 </form></body></html>
 `;
 
-const HTML_FORMULARIO_CAPTCHA = `<html><body>Por favor resuelva el <strong>captcha</strong> para continuar.</body></html>`;
+// Pagina de desafio REAL: sin __VIEWSTATE (no es la pagina de ASP.NET) y con
+// un widget de reCAPTCHA visible (data-sitekey).
+const HTML_PAGINA_DESAFIO_REAL = `<html><body><div class="g-recaptcha" data-sitekey="6LVERYFAKEKEY0000000000000"></div><p>Verificación adicional requerida antes de continuar.</p></body></html>`;
 
 function gridConFilas(n) {
   let filas = "";
@@ -202,8 +212,17 @@ test("construirCuerpoDetalle manda .x/.y de la fila elegida y nunca btnConsultar
   );
 });
 
-test("pareceDesafioOCaptcha detecta un captcha y no un formulario normal", () => {
-  assert.ok(rgmPlanAPareceDesafioOCaptcha(HTML_FORMULARIO_CAPTCHA));
+test("pareceDesafioOCaptcha detecta un desafio real y no un formulario normal", () => {
+  assert.ok(rgmPlanAPareceDesafioOCaptcha(HTML_PAGINA_DESAFIO_REAL));
+  assert.ok(!rgmPlanAPareceDesafioOCaptcha(HTML_FORMULARIO));
+});
+
+test("Prompt 8d punto 1: formulario con recaptchaResponse vacio NO es falsa alarma de captcha", () => {
+  // El formulario real trae la palabra "captcha" (script, campo
+  // recaptchaResponse) sin que eso sea un desafio: decidir solo por la
+  // palabra daba una falsa alarma siempre. Debe seguir siendo valido.
+  assert.ok(HTML_FORMULARIO.toLowerCase().includes("captcha"));
+  assert.ok(rgmPlanAFormularioValido(HTML_FORMULARIO));
   assert.ok(!rgmPlanAPareceDesafioOCaptcha(HTML_FORMULARIO));
 });
 
@@ -259,12 +278,24 @@ testAsync("consultarRgmPlanA: sin __VIEWSTATE cae a plan B con motivo legible", 
   assert.ok(resultado.motivo.includes("__VIEWSTATE"));
 });
 
-testAsync("consultarRgmPlanA: captcha en el paso 1 cae a plan B con motivo legible", async () => {
-  const fetchFn = async () => respuestaFalsa(HTML_FORMULARIO_CAPTCHA);
+testAsync("consultarRgmPlanA: desafio real en el paso 1 cae a plan B con motivo legible", async () => {
+  const fetchFn = async () => respuestaFalsa(HTML_PAGINA_DESAFIO_REAL);
   const resultado = await consultarRgmPlanA("GCT953", { fetchFn });
   assert.strictEqual(resultado.ok, false);
   assert.ok(resultado.motivo.includes("captcha"));
   assert.ok(!resultado.motivo.includes("VIEWSTATE_REAL")); // nunca revienta nada sensible en el motivo
+});
+
+testAsync("consultarRgmPlanA: formulario con recaptchaResponse vacio NO cae a plan B (falsa alarma corregida)", async () => {
+  let llamada = 0;
+  const fetchFn = async () => {
+    llamada += 1;
+    if (llamada === 1) return respuestaFalsa(HTML_FORMULARIO); // trae la palabra "captcha", pero es valido
+    return respuestaFalsa(deltaBusqueda(gridConFilas(0)));
+  };
+  const resultado = await consultarRgmPlanA("ZZZ999", { fetchFn });
+  assert.strictEqual(resultado.ok, true);
+  assert.strictEqual(resultado.resultado.estado, "SIN_DATOS");
 });
 
 testAsync("consultarRgmPlanA: HTTP 500 en cualquier paso cae a plan B con el codigo", async () => {

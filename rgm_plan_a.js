@@ -288,21 +288,48 @@ const RGM_PLAN_A_CABECERAS_POST = {
 };
 
 // --------------------------------------------------------------------------
-// Deteccion de captcha/desafio (heuristica, mejor esfuerzo): si el HTML no
-// trae ninguna marca reconocible de ASP.NET ni de un desafio conocido, se
-// trata como "no se pudo confirmar que sea la pagina esperada" -> plan B.
+// Validez del formulario (Prompt 8d, punto 1): el formulario real del RGM
+// trae un campo oculto "recaptchaResponse" (vacio) y scripts que mencionan
+// la palabra "captcha" aunque no haya ningun desafio -- decidir por esa
+// palabra sola daba una falsa alarma SIEMPRE. El formulario es valido si
+// trae los campos de ASP.NET/CSFK y el campo de la placa, sin importar que
+// contenga la palabra "captcha" en algun lado.
+// --------------------------------------------------------------------------
+
+function rgmPlanAFormularioValido(html) {
+  const htmlStr = html || "";
+  return (
+    !!rgmPlanAExtraerCampoOculto(htmlStr, "__VIEWSTATE") &&
+    !!rgmPlanAExtraerCampoOculto(htmlStr, "__EVENTVALIDATION") &&
+    !!rgmPlanAExtraerCampoOculto(htmlStr, "ctl00$ctl00$hdnCSFK") &&
+    htmlStr.includes(RGM_PLAN_A_CAMPO_PLACA)
+  );
+}
+
+// --------------------------------------------------------------------------
+// Deteccion de desafio/captcha REAL (heuristica, mejor esfuerzo): solo se usa
+// cuando el formulario ya resulto invalido (le faltan los campos de arriba).
+// Si trae __VIEWSTATE nunca es un desafio (es la pagina real de ASP.NET,
+// aunque mencione la palabra "captcha" en un campo vacio o un script). Se
+// considera un desafio real cuando aparece un widget de reCAPTCHA visible
+// (con data-sitekey) o una pagina de verificacion conocida y corta.
 // --------------------------------------------------------------------------
 
 function rgmPlanAPareceDesafioOCaptcha(html) {
-  const texto = (html || "").toLowerCase();
-  return (
-    texto.includes("captcha") ||
-    texto.includes("recaptcha") ||
-    texto.includes("verificación adicional") ||
-    texto.includes("verificacion adicional") ||
-    texto.includes("acceso denegado") ||
-    texto.includes("cloudflare")
-  );
+  const htmlStr = html || "";
+  if (rgmPlanAExtraerCampoOculto(htmlStr, "__VIEWSTATE")) return false;
+  const texto = htmlStr.toLowerCase();
+  const tieneRecaptchaVisible = /g-recaptcha[^>]*data-sitekey/i.test(htmlStr);
+  const esPaginaDeVerificacionConocidaYCorta =
+    htmlStr.length < 1000 &&
+    (texto.includes("verificación adicional") ||
+      texto.includes("verificacion adicional") ||
+      texto.includes("verifying you are human") ||
+      texto.includes("checking your browser") ||
+      texto.includes("acceso denegado") ||
+      texto.includes("cloudflare") ||
+      texto.includes("attention required"));
+  return tieneRecaptchaVisible || esPaginaDeVerificacionConocidaYCorta;
 }
 
 // --------------------------------------------------------------------------
@@ -331,13 +358,13 @@ async function consultarRgmPlanA(placa, { fetchFn, crearOffscreenYExtraer, log }
     return { ok: false, motivo: "paso 1 (GET formulario) respondió con error", httpStatus: respuestaForm.status };
   }
   const htmlForm = await respuestaForm.text();
-  if (rgmPlanAPareceDesafioOCaptcha(htmlForm)) {
-    return { ok: false, motivo: "paso 1: la respuesta parece un captcha/desafío, no el formulario", httpStatus: respuestaForm.status, cuerpoInicio: htmlForm.slice(0, 200) };
+  if (!rgmPlanAFormularioValido(htmlForm)) {
+    if (rgmPlanAPareceDesafioOCaptcha(htmlForm)) {
+      return { ok: false, motivo: "paso 1: la respuesta parece un captcha/desafío, no el formulario", httpStatus: respuestaForm.status, cuerpoInicio: htmlForm.slice(0, 200) };
+    }
+    return { ok: false, motivo: "paso 1: no trajo los campos esperados del formulario (__VIEWSTATE, __EVENTVALIDATION, hdnCSFK o txtNumBien)", httpStatus: respuestaForm.status, cuerpoInicio: htmlForm.slice(0, 200) };
   }
   let campos = rgmPlanAExtraerCamposOcultos(htmlForm);
-  if (!campos["__VIEWSTATE"]) {
-    return { ok: false, motivo: "paso 1: no trajo __VIEWSTATE", httpStatus: respuestaForm.status, cuerpoInicio: htmlForm.slice(0, 200) };
-  }
 
   // 2) POST asincrono: buscar la placa
   let respuestaBusqueda;
@@ -443,6 +470,6 @@ if (typeof module !== "undefined") {
     rgmPlanABuscarHiddenFieldEnDelta, rgmPlanABuscarUpdatePanelEnDelta, rgmPlanAExtraerPageRedirect,
     rgmPlanAExtraerFilasGrid, rgmPlanAParsearFechaDDMMYYYY, rgmPlanAElegirFilaMasReciente,
     rgmPlanAConstruirCuerpoBusqueda, rgmPlanAConstruirCuerpoDetalle, rgmPlanAPareceDesafioOCaptcha,
-    consultarRgmPlanA, RGM_PLAN_A_CAMPOS_OCULTOS, RGM_PLAN_A_BASE_URL,
+    rgmPlanAFormularioValido, consultarRgmPlanA, RGM_PLAN_A_CAMPOS_OCULTOS, RGM_PLAN_A_BASE_URL,
   };
 }
